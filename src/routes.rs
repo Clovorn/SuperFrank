@@ -36,6 +36,8 @@ pub fn api_router() -> Router<AppState> {
         .route("/mailbox/write", post(mailbox_write))
         .route("/mailbox/read", get(mailbox_read))
         .route("/mailbox/mark_read", post(mailbox_mark_read))
+        // Gap 11: Agent Spawn
+        .route("/agent/spawn", post(agent_spawn_endpoint))
 }
 
 fn extract_user(headers: &HeaderMap, secret: &str) -> Option<(Uuid, String, String)> {
@@ -911,4 +913,104 @@ async fn mailbox_mark_read(
         .bind(&uuids).execute(&state.db).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
     Ok(Json(json!({"success": true, "updated": result.rows_affected()})))
+}
+
+// ── Gap 11: Agent Spawn HTTP Endpoint ────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct AgentSpawnReq {
+    name: String,
+    goal: String,
+    model: Option<String>,
+    context: Option<String>,
+}
+
+async fn agent_spawn_endpoint(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<AgentSpawnReq>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some((user_id, _email, _role)) = extract_user(&headers, &state.config.jwt_secret) else {
+        return Err((StatusCode::UNAUTHORIZED, Json(json!({"error": "Unauthorized"}))));
+    };
+
+    let name = &body.name;
+    let goal = &body.goal;
+    let model = body.model.as_deref().unwrap_or("claude-sonnet-4-5");
+    let mut context = body.context.clone().unwrap_or_default();
+    
+    // Check if this matches a persistent agent
+    let persistent: Option<(Uuid, String, String)> = sqlx::query_as(
+        "SELECT id, system_prompt, memory_ns FROM frank_persistent_agents WHERE name = $1 AND status != 'archived'"
+    ).bind(name).fetch_optional(&state.db).await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+    
+    let agent_id = Uuid::new_v4();
+    
+    if let Some((persistent_id, system_prompt, memory_ns)) = persistent {
+        // This is a persistent agent — use its system prompt
+        if context.is_empty() {
+            context = system_prompt.clone();
+        } else {
+            context = format!("{}\n\n---\n\nAdditional context for this task:\n{}", system_prompt, context);
+        }
+        
+        // Insert into frankos_agents (ephemeral spawn record)
+        sqlx::query(
+            "INSERT INTO frankos_agents (id, name, goal, model, parent_session_id, user_id, status, tools_allowed)
+             VALUES ($1, $2, $3, $4, $5, $6, 'spawned', '[]')"
+        )
+        .bind(agent_id)
+        .bind(name)
+        .bind(goal)
+        .bind(model)
+        .bind(Uuid::nil()) // No session context for HTTP spawns
+        .bind(user_id)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+        
+        // Log initial context to persistent conversation history
+        sqlx::query(
+            "INSERT INTO frank_agent_conversations (agent_id, role, content) VALUES ($1, 'system', $2)"
+        ).bind(persistent_id).bind(&context).execute(&state.db).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+        
+        // Log the goal as a user message
+        sqlx::query(
+            "INSERT INTO frank_agent_conversations (agent_id, role, content) VALUES ($1, 'user', $2)"
+        ).bind(persistent_id).bind(goal).execute(&state.db).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+        
+        Ok(Json(json!({
+            "success": true,
+            "agent_id": agent_id,
+            "persistent_agent_id": persistent_id,
+            "name": name,
+            "goal": goal,
+            "memory_namespace": memory_ns
+        })))
+    } else {
+        // Ephemeral agent
+        sqlx::query(
+            "INSERT INTO frankos_agents (id, name, goal, model, parent_session_id, user_id, status, tools_allowed)
+             VALUES ($1, $2, $3, $4, $5, $6, 'spawned', '[]')"
+        )
+        .bind(agent_id)
+        .bind(name)
+        .bind(goal)
+        .bind(model)
+        .bind(Uuid::nil())
+        .bind(user_id)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+        
+        Ok(Json(json!({
+            "success": true,
+            "agent_id": agent_id,
+            "name": name,
+            "goal": goal
+        })))
+    }
 }
