@@ -385,10 +385,11 @@ impl Swarm {
             let result = swarm.run_single(task, tx, tool_ctx).await;
 
             // Deliver result to user
+            let truncated = result.result.chars().take(500).collect::<String>();
             let _ = delivery.notify_user(
                 user_id,
                 &format!("✅ {}", name),
-                &result.result[..result.result.len().min(500)],
+                &truncated,
             ).await;
         });
 

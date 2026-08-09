@@ -9,7 +9,7 @@ use axum::{
 };
 use futures_util::StreamExt;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::json;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
@@ -19,7 +19,7 @@ use crate::{
     identity,
     llm::{ChatMessage, LlmProvider, StreamEvent},
     memory,
-    tools::{all_tools_v3, execute_tool, to_anthropic_tools, ToolContext},
+    tools::{all_tools_v3, to_anthropic_tools, ToolContext},
     AppState,
 };
 

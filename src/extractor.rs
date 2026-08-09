@@ -2,7 +2,6 @@
 //! Gap 7B: Aggressive, type-aware classification. Working noise discarded.
 
 use anyhow::Result;
-use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
 

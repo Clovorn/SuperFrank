@@ -6,7 +6,6 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
-use tracing::info;
 
 use crate::agents::{AgentResponse, ToolCall};
 

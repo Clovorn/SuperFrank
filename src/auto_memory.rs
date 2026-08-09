@@ -1,7 +1,6 @@
 //! Gap 7D — Auto Memory Write
 //! Automatically capture significant actions to memory
 
-use serde_json::Value;
 use sqlx::PgPool;
 use tracing::info;
 use uuid::Uuid;

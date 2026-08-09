@@ -3,7 +3,6 @@
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashMap;
 use std::process::Stdio;
 use tokio::process::Command;
 use tracing::{info, warn};
@@ -1204,12 +1203,9 @@ async fn exec_gemini_chat(input: &Value, ctx: &ToolContext) -> Result<Value> {
     Ok(json!({ "result": result, "model": model }))
 }
 
-/// All tools including Google AI and Luma
-
 // ── Luma tool executors ───────────────────────────────────────────────────────
 
 // make_luma_client defined below
-
 
 /// All tools including Google AI and Luma
 pub fn all_tools_full() -> Vec<ToolDef> {

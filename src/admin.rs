@@ -4,10 +4,10 @@ use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
     response::Json,
-    routing::{delete, get, post, put},
+    routing::{delete, get, post},
     Router,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::Row;
 use std::process::Stdio;

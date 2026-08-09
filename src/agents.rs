@@ -7,9 +7,9 @@ use std::sync::Arc;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::llm::{ChatMessage, LlmClient, LlmProvider};
+use crate::llm::{ChatMessage, LlmClient};
 use crate::tools::{all_tools, execute_tool, to_anthropic_tools, ToolContext};
-use crate::identity;
+
 
 /// Model name → Anthropic model string
 fn resolve_model(model_hint: &str) -> &'static str {

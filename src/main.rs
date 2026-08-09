@@ -4,7 +4,7 @@ use anyhow::Result;
 use axum::{
     extract::State,
     response::Json,
-    routing::{get, post},
+    routing::get,
     Router,
 };
 use serde_json::{json, Value};
@@ -43,6 +43,7 @@ mod goals_tools;
 mod skills_tools;
 mod embeddings;
 mod semantic_search;
+mod worker;
 mod events;
 mod plan_continuation;
 
@@ -181,6 +182,11 @@ async fn main() -> Result<()> {
     let nexus = nexus::Nexus::new(pool.clone(), swarm_inst.clone(), delivery.clone());
     tokio::spawn(async move { nexus.run().await });
     info!("Nexus started");
+    // Start agent worker loop — picks up spawned agents without needing an active chat turn
+    let worker_pool = pool.clone();
+    let worker_llm = llm.clone();
+    let worker_brave = config.brave_api_key.clone();
+    tokio::spawn(worker::run_agent_worker(worker_pool, worker_llm, worker_brave));
 
     // Periodic Forge reaper (clean up old exited processes every 10 min)
     let forge_reaper = forge.clone();

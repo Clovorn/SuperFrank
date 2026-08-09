@@ -75,7 +75,6 @@ pub async fn recall(
     _project_id: Option<Uuid>,
     limit_per_layer: i64,
 ) -> Result<RecallContext> {
-    use sqlx::Row;
     let mut ctx = RecallContext::default();
 
     let telos_rows = sqlx::query(
