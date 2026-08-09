@@ -431,3 +431,32 @@ pub async fn run_v10_migrations(pool: &sqlx::PgPool) -> anyhow::Result<()> {
     tracing::info!("v10 migrations complete");
     Ok(())
 }
+
+pub async fn run_v11_migrations(pool: &sqlx::PgPool) -> anyhow::Result<()> {
+    tracing::info!("Running v11 migrations (Phase 1: Task Orchestration Table)...");
+
+    sqlx::query("
+        CREATE TABLE IF NOT EXISTS tasks (
+            id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            title           TEXT NOT NULL,
+            description     TEXT,
+            status          TEXT NOT NULL DEFAULT 'PLANNING',
+            priority        INTEGER DEFAULT 5,
+            assigned_to     TEXT,
+            created_at      TIMESTAMPTZ DEFAULT now(),
+            updated_at      TIMESTAMPTZ DEFAULT now(),
+            completed_at    TIMESTAMPTZ,
+            context         TEXT,
+            parent_task_id  UUID REFERENCES tasks(id),
+            blocked_reason  TEXT,
+            result_location TEXT
+        )
+    ").execute(pool).await?;
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_tasks_status      ON tasks(status)").execute(pool).await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_tasks_assigned_to ON tasks(assigned_to)").execute(pool).await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_tasks_parent      ON tasks(parent_task_id)").execute(pool).await?;
+
+    tracing::info!("v11 migrations complete");
+    Ok(())
+}

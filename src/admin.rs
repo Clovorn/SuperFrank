@@ -29,6 +29,9 @@ pub fn admin_router() -> Router<AppState> {
         // Agents
         .route("/admin/agents",        get(list_agents))
         .route("/admin/agents/:id",    get(get_agent))
+        // Tasks
+        .route("/admin/tasks",            get(crate::tasks::list_tasks).post(crate::tasks::create_task))
+        .route("/admin/tasks/:id",        get(crate::tasks::get_task).patch(crate::tasks::update_task))
         // Health
         .route("/admin/health",        get(health_check))
         // Usage stats
