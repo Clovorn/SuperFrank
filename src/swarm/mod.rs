@@ -398,16 +398,14 @@ impl Swarm {
     async fn create_agent_record(&self, task: &SwarmTask, model: &str) -> Result<Uuid> {
         let id = Uuid::new_v4();
         sqlx::query(
-            "INSERT INTO frankos_agents (id, name, goal, model, tools_allowed, parent_session_id, user_id, status)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, 'running')"
+            "INSERT INTO frankos_agents (id, name, goal, model, tools_allowed, status)
+             VALUES ($1, $2, $3, $4, $5, 'running')"
         )
         .bind(id)
         .bind(&task.name)
         .bind(&task.goal)
         .bind(model)
         .bind(json!(task.tools.as_deref().unwrap_or(&[])))
-        .bind(Uuid::nil())
-        .bind(Uuid::nil())
         .execute(&self.db)
         .await?;
         Ok(id)
