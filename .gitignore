@@ -1,0 +1,21 @@
+# Build output
+target/
+frankos-gateway
+
+# Backups
+src.bak-*/
+*.bak
+*.bak-*
+
+# Env / secrets
+.env
+*.env
+keys/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store

@@ -1,0 +1,45 @@
+[package]
+name = "frankos-gateway"
+version = "3.0.0"
+edition = "2021"
+description = "FrankOS Gateway — SuperFrank v3 — Nexus + Forge + Swarm"
+
+[[bin]]
+name = "frankos-gateway"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.7", features = ["ws"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.7", features = ["postgres", "runtime-tokio-rustls", "json", "uuid", "time", "chrono"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+time = { version = "0.3", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+dotenv = "0.15"
+jsonwebtoken = "9"
+bcrypt = "0.15"
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream", "multipart"], default-features = false }
+futures-util = "0.3"
+futures = "0.3"
+async-stream = "0.3"
+tokio-stream = { version = "0.1", features = ["sync"] }
+bytes = "1"
+chrono = { version = "0.4", features = ["serde"] }
+
+# v3 additions
+cron = "0.12"                          # Nexus cron expression parser
+dashmap = "6"                          # Forge concurrent process map (stable release)
+similar = "2"                          # apply_patch diff / patch engine
+notify = "6"                           # Perception filesystem watcher
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
