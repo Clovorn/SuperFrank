@@ -2044,7 +2044,7 @@ async fn exec_agent_spawn_fixed(input: &Value, ctx: &ToolContext) -> Result<Valu
         // Insert into frankos_agents (ephemeral spawn record)
         sqlx::query(
             "INSERT INTO frankos_agents (id, name, goal, model, parent_session_id, user_id, status, tools_allowed)
-             VALUES ($1, $2, $3, $4, $5, $6, 'spawned', '[]'))"
+             VALUES ($1, $2, $3, $4, $5, $6, 'spawned', '[]')"
         )
         .bind(agent_id)
         .bind(name)
@@ -2080,7 +2080,7 @@ async fn exec_agent_spawn_fixed(input: &Value, ctx: &ToolContext) -> Result<Valu
         // Insert into frankos_agents
         sqlx::query(
             "INSERT INTO frankos_agents (id, name, goal, model, parent_session_id, user_id, status, tools_allowed)
-             VALUES ($1, $2, $3, $4, $5, $6, 'spawned', '[]'))"
+             VALUES ($1, $2, $3, $4, $5, $6, 'spawned', '[]')"
         )
         .bind(agent_id)
         .bind(name)
