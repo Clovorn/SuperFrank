@@ -116,12 +116,12 @@ Be concise in your final response — SuperFrank will synthesize your results."#
         ChatMessage { role: "user".to_string(), content: goal.clone() }
     ];
 
-    // Agentic tool loop — up to 10 iterations
-    for iteration in 0..10 {
+    // Agentic tool loop — up to 50 iterations
+    for iteration in 0..50 {
         info!("Agent {} iteration {}", agent_id, iteration);
 
         let response = llm.complete_with_tools(
-            "claude-haiku-4-5",
+            model,
             &system,
             &messages,
             8192,
@@ -214,7 +214,7 @@ pub async fn spawn_pending_agents(
     use sqlx::Row;
 
     let rows = sqlx::query(
-        "SELECT id FROM frankos_agents WHERE status = 'pending' ORDER BY created_at ASC LIMIT 10"
+        "SELECT id FROM frankos_agents WHERE status = 'spawned' ORDER BY created_at ASC LIMIT 10"
     ).fetch_all(db).await.unwrap_or_default();
 
     for row in rows {
