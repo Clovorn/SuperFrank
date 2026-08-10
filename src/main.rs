@@ -45,6 +45,7 @@ mod embeddings;
 mod semantic_search;
 mod worker;
 mod tasks;
+mod task_stream;
 mod events;
 mod plan_continuation;
 
@@ -168,6 +169,7 @@ async fn main() -> Result<()> {
     db::run_v9_migrations(&pool).await?;
     db::run_v10_migrations(&pool).await?;
     db::run_v11_migrations(&pool).await?;
+    db::run_v12_migrations(&pool).await?;
 
     let state = AppState {
         db: pool.clone(),

@@ -460,3 +460,53 @@ pub async fn run_v11_migrations(pool: &sqlx::PgPool) -> anyhow::Result<()> {
     tracing::info!("v11 migrations complete");
     Ok(())
 }
+
+pub async fn run_v12_migrations(pool: &sqlx::PgPool) -> anyhow::Result<()> {
+    tracing::info!("Running v12 migrations (Phase 2: LISTEN/NOTIFY trigger on tasks)...");
+
+    // Function: emit task_change notification with row JSON
+    sqlx::query("
+        CREATE OR REPLACE FUNCTION notify_task_change()
+        RETURNS trigger AS $$
+        DECLARE
+            payload TEXT;
+        BEGIN
+            IF TG_OP = 'DELETE' THEN
+                payload := json_build_object(
+                    'op', TG_OP,
+                    'id', OLD.id,
+                    'status', OLD.status,
+                    'assigned_to', OLD.assigned_to
+                )::text;
+                PERFORM pg_notify('task_change', payload);
+                RETURN OLD;
+            ELSE
+                payload := json_build_object(
+                    'op', TG_OP,
+                    'id', NEW.id,
+                    'title', NEW.title,
+                    'status', NEW.status,
+                    'priority', NEW.priority,
+                    'assigned_to', NEW.assigned_to,
+                    'blocked_reason', NEW.blocked_reason,
+                    'result_location', NEW.result_location,
+                    'updated_at', NEW.updated_at
+                )::text;
+                PERFORM pg_notify('task_change', payload);
+                RETURN NEW;
+            END IF;
+        END;
+        $$ LANGUAGE plpgsql;
+    ").execute(pool).await?;
+
+    // Trigger: fires after INSERT or UPDATE on tasks
+    sqlx::query("DROP TRIGGER IF EXISTS task_change_trigger ON tasks").execute(pool).await?;
+    sqlx::query("
+        CREATE TRIGGER task_change_trigger
+        AFTER INSERT OR UPDATE OR DELETE ON tasks
+        FOR EACH ROW EXECUTE FUNCTION notify_task_change();
+    ").execute(pool).await?;
+
+    tracing::info!("v12 migrations complete — task_change trigger installed");
+    Ok(())
+}
