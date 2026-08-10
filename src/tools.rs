@@ -1105,16 +1105,17 @@ async fn exec_spawn_agent(input: &Value, ctx: &ToolContext) -> Result<Value> {
         .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
         .unwrap_or_default();
 
-    // Create agent record in DB
+    // Create agent record — NULL parent_session_id when called from agent context (nil UUID = FK violation)
+    let parent_sid: Option<uuid::Uuid> = if ctx.session_id == uuid::Uuid::nil() { None } else { Some(ctx.session_id) };
     let agent_id: uuid::Uuid = sqlx::query_scalar(
         r#"INSERT INTO frankos_agents (name, goal, status, tools_allowed, model, parent_session_id, user_id)
-           VALUES ($1, $2, 'pending', $3, $4, $5, $6) RETURNING id"#
+           VALUES ($1, $2, 'spawned', $3, $4, $5, $6) RETURNING id"#
     )
     .bind(&name)
     .bind(&goal)
     .bind(serde_json::to_value(&tools).unwrap_or(json!([])))
     .bind(&model)
-    .bind(ctx.session_id)
+    .bind(parent_sid)
     .bind(ctx.user_id)
     .fetch_one(&ctx.db).await?;
 

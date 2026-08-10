@@ -284,13 +284,27 @@ impl Swarm {
 
                 let result = execute_tool(&tc.name, &tc.input, &tool_ctx).await;
 
+                let output_preview = if let Some(s) = result.output.as_str() {
+                    // Safe UTF-8 char boundary truncation
+                    s.char_indices()
+                        .nth(200)
+                        .map(|(idx, _)| &s[..idx])
+                        .unwrap_or(s)
+                        .to_string()
+                } else {
+                    let s = result.output.to_string();
+                    s.char_indices()
+                        .nth(200)
+                        .map(|(idx, _)| &s[..idx])
+                        .unwrap_or(&s)
+                        .to_string()
+                };
+
                 let _ = tx.send(SwarmEvent::AgentToolResult {
                     agent_id,
                     tool_name: tc.name.clone(),
                     success: result.success,
-                    output_preview: result.output.as_str()
-                        .map(|s| s[..s.len().min(200)].to_string())
-                        .unwrap_or_else(|| result.output.to_string()[..200.min(result.output.to_string().len())].to_string()),
+                    output_preview,
                 }).await;
 
                 let _ = sqlx::query(
