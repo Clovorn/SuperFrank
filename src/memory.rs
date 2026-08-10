@@ -117,6 +117,26 @@ pub async fn recall(
         });
     }
 
+    // Inject TRAINING_NOTES.md as a priority-9 build_state entry (lessons learned)
+    if let Ok(notes) = tokio::fs::read_to_string("/opt/frankos/workspace/TRAINING_NOTES.md").await {
+        let notes_content = if notes.len() > 4000 {
+            notes[..4000].to_string() + "
+...[TRAINING_NOTES truncated — read full file with file_read /opt/frankos/workspace/TRAINING_NOTES.md]"
+        } else {
+            notes.clone()
+        };
+        ctx.build_state.push(MemoryEntry {
+            id: uuid::Uuid::nil(),
+            bucket: "build_state".to_string(),
+            namespace: namespace.to_string(),
+            memory_type: "procedure".to_string(),
+            title: "TRAINING_NOTES — Lessons Learned".to_string(),
+            content: notes_content,
+            importance: 9,
+            tags: vec!["training".to_string(), "lessons".to_string()],
+        });
+    }
+
     Ok(ctx)
 }
 
