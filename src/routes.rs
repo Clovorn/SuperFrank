@@ -19,6 +19,7 @@ pub fn api_router() -> Router<AppState> {
         .route("/auth/register", post(auth_register))
         .route("/auth/login", post(auth_login))
         .route("/chat/sessions", get(list_sessions).post(create_session))
+        .route("/chat/sessions/count", get(count_sessions))
         .route("/chat/sessions/:id/messages", get(get_messages).post(send_message))
         .route("/identity/:doc_id", get(get_identity_doc).put(put_identity_doc))
         .route("/notifications/test", post(notifications_test))
@@ -131,6 +132,21 @@ async fn auth_login(
 struct LoginRequest { email: String, password: String }
 
 // ── Chat ──────────────────────────────────────────────────────────────────────
+
+async fn count_sessions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let (user_id, _, _) = extract_user(&headers, &state.config.jwt_secret)
+        .ok_or_else(|| (StatusCode::UNAUTHORIZED, Json(json!({"error": "Unauthorized"}))))?;
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM frankos_sessions WHERE user_id = $1 AND revoked_at IS NULL"
+    )
+    .bind(user_id).fetch_one(&state.db).await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+    Ok(Json(json!({ "count": count })))
+}
+
 
 async fn list_sessions(
     State(state): State<AppState>,
