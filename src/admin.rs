@@ -38,6 +38,7 @@ pub fn admin_router() -> Router<AppState> {
         // Usage stats
         .route("/admin/stats",         get(usage_stats))
         .route("/engineer/status",     get(engineer_status_handler))
+        .route("/version", get(version_handler))
 }
 
 fn require_master(headers: &HeaderMap, secret: &str) -> Result<Uuid, (StatusCode, Json<Value>)> {
@@ -45,6 +46,18 @@ fn require_master(headers: &HeaderMap, secret: &str) -> Result<Uuid, (StatusCode
         Some((uid, _, _)) => Ok(uid),
         None => Err((StatusCode::UNAUTHORIZED, Json(json!({"error": "Unauthorized"})))),
     }
+}
+
+// ── Version ───────────────────────────────────────────────────────────────────
+
+pub async fn version_handler() -> Json<Value> {
+    Json(serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "name": "frankos-gateway",
+        "frank_version": crate::identity::FRANK_VERSION,
+        "built_at": env!("CARGO_PKG_VERSION"),
+        "git_hash": option_env!("GIT_HASH").unwrap_or("unknown")
+    }))
 }
 
 // ── API Keys ──────────────────────────────────────────────────────────────────
