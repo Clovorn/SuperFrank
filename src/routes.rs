@@ -957,15 +957,16 @@ async fn agent_spawn_endpoint(
         
         // Insert into frankos_agents (ephemeral spawn record)
         sqlx::query(
-            "INSERT INTO frankos_agents (id, name, goal, model, parent_session_id, user_id, status, tools_allowed)
-             VALUES ($1, $2, $3, $4, $5, $6, 'spawned', '[]')"
+            "INSERT INTO frankos_agents (id, name, goal, model, parent_session_id, user_id, persistent_agent_id, status, tools_allowed)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 'spawned', '[]')"
         )
         .bind(agent_id)
         .bind(name)
         .bind(goal)
         .bind(model)
-        .bind(Uuid::nil()) // No session context for HTTP spawns
+        .bind(None::<Uuid>) // No session context for HTTP spawns
         .bind(user_id)
+        .bind(persistent_id)
         .execute(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;

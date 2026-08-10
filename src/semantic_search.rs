@@ -111,7 +111,7 @@ pub async fn hybrid_search(
                 tags,
                 created_at,
                 updated_at,
-                1 - (embedding <=> $1::vector) as semantic_score
+                1 - (embedding <=> $1::text::vector(1536)) as semantic_score
             FROM frankos_memory
             WHERE namespace = $2
                 AND embedding IS NOT NULL

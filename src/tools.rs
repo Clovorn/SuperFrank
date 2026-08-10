@@ -442,6 +442,16 @@ pub async fn execute_tool(
         "mailbox_read"      => exec_mailbox_read(input, ctx).await,
         "mailbox_mark_read" => exec_mailbox_mark_read(input, ctx).await,
 
+        // Task management tools — Engineer task queue
+        "task_list_pending" => Ok(crate::task_tools::exec_task_list_pending(&ctx.db).await
+            .unwrap_or_else(|e| serde_json::json!({"error": e.to_string()}))),
+        "task_claim" => Ok(crate::task_tools::exec_task_claim(input, &ctx.db).await
+            .unwrap_or_else(|e| serde_json::json!({"error": e.to_string()}))),
+        "task_done" => Ok(crate::task_tools::exec_task_done(input, &ctx.db).await
+            .unwrap_or_else(|e| serde_json::json!({"error": e.to_string()}))),
+        "task_block" => Ok(crate::task_tools::exec_task_block(input, &ctx.db).await
+            .unwrap_or_else(|e| serde_json::json!({"error": e.to_string()}))),
+
         // ── Expanded Capability Pack ──────────────────────────────────────────
         "send_email"            => exec_send_email(input, ctx).await,
         "github_list_repos"     => exec_github_list_repos(input, ctx).await,
@@ -1554,6 +1564,49 @@ pub fn compound_tools() -> Vec<ToolDef> {
             }),
         },
 
+        ToolDef {
+            name: "task_list_pending".into(),
+            description: "List all PENDING tasks assigned to Engineer. Returns task_id, title, description, priority. Call this first to find what to work on.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
+        ToolDef {
+            name: "task_claim".into(),
+            description: "Atomically claim a PENDING task. Sets status to IN_PROGRESS and returns full task details. Always claim before starting work.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string", "description": "UUID of the task to claim" }
+                },
+                "required": ["task_id"]
+            }),
+        },
+        ToolDef {
+            name: "task_done".into(),
+            description: "Mark a task COMPLETE. Call this after successfully finishing work on a claimed task.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string", "description": "UUID of the task" },
+                    "outcome": { "type": "string", "description": "Short summary of what was done" }
+                },
+                "required": ["task_id", "outcome"]
+            }),
+        },
+        ToolDef {
+            name: "task_block".into(),
+            description: "Mark a task BLOCKED. Use when you cannot complete it without external help. Writes blocker to FRANK_TO_MAC.md for Mac Frank.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string", "description": "UUID of the task" },
+                    "reason": { "type": "string", "description": "Exact reason blocked — what is needed to unblock" }
+                },
+                "required": ["task_id", "reason"]
+            }),
+        },
     ]
 }
 

@@ -544,3 +544,11 @@ async fn detect_key(
         Ok(Json(json!({ "detected": false })))
     }
 }
+
+/// GET /api/v1/engineer/status — current Engineer resident loop state
+pub async fn engineer_status_handler(
+    State(state): State<AppState>,
+) -> Json<Value> {
+    let status = state.engineer_status.read().await;
+    Json(serde_json::to_value(&*status).unwrap_or(serde_json::json!({"error": "serialize failed"})))
+}
