@@ -4,13 +4,14 @@ use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
     response::Json,
-    routing::{get, post, put},
+    routing::{get, patch, post, put},
     Router,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::Row;
 use uuid::Uuid;
+use sha2::{Sha256, Digest};
 
 use crate::{auth, extractor, identity, llm::{ChatMessage, LlmProvider}, memory, semantic_search, tools, tool_registry, AppState};
 
@@ -18,6 +19,11 @@ pub fn api_router() -> Router<AppState> {
     Router::new()
         .route("/auth/register", post(auth_register))
         .route("/auth/login", post(auth_login))
+        .route("/auth/refresh", post(auth_refresh))
+        .route("/users/me", get(get_me).patch(patch_me))
+        .route("/auth/logout", post(auth_logout))
+        .route("/admin/users", get(admin_list_users))
+        .route("/admin/users/:id", patch(admin_update_user))
         .route("/chat/sessions", get(list_sessions).post(create_session))
         .route("/chat/sessions/count", get(count_sessions))
         .route("/chat/sessions/:id/messages", get(get_messages).post(send_message))
@@ -49,6 +55,31 @@ fn extract_user(headers: &HeaderMap, secret: &str) -> Option<(Uuid, String, Stri
     Some((user_id, claims.email, claims.role))
 }
 
+fn require_master_user(headers: &HeaderMap, secret: &str) -> Option<Uuid> {
+    let (user_id, _, role) = extract_user(headers, secret)?;
+    if role == "master_user" { Some(user_id) } else { None }
+}
+
+// ── Refresh Token Helpers ─────────────────────────────────────────────────────
+
+fn hash_token(token: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(token.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+async fn store_refresh_token(db: &sqlx::PgPool, user_id: Uuid) -> anyhow::Result<String> {
+    let raw = uuid::Uuid::new_v4().to_string();
+    let hashed = hash_token(&raw);
+    sqlx::query(
+        "INSERT INTO frank_refresh_tokens (user_id, token_hash, expires_at)
+         VALUES ($1, $2, NOW() + INTERVAL '30 days')"
+    )
+    .bind(user_id).bind(&hashed)
+    .execute(db).await?;
+    Ok(raw)
+}
+
 // ── Auth ──────────────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -67,6 +98,7 @@ struct AuthResponse {
     role: String,
     relationship: String,
     is_master_user: bool,
+    refresh_token: Option<String>,
 }
 
 async fn auth_register(
@@ -89,6 +121,7 @@ async fn auth_register(
     Ok(Json(AuthResponse {
         token, user_id: user_id.to_string(), email: req.email, name: req.name,
         role: "user".to_string(), relationship: "user".to_string(), is_master_user: false,
+        refresh_token: None,
     }))
 }
 
@@ -122,14 +155,195 @@ async fn auth_login(
     let role_str: String = row.try_get("role").unwrap_or_else(|_| "user".to_string());
     let is_master_user: bool = row.try_get("is_master_user").unwrap_or(false);
 
+    let refresh_token = Some(store_refresh_token(&state.db, user_id).await.unwrap_or_default());
+
     Ok(Json(AuthResponse {
         token, user_id: user_id.to_string(), email, name,
-        role: role_str, relationship, is_master_user,
+        role: role_str, relationship, is_master_user, refresh_token,
     }))
 }
 
 #[derive(Deserialize)]
 struct LoginRequest { email: String, password: String }
+
+async fn get_me(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let (user_id, _, _) = extract_user(&headers, &state.config.jwt_secret)
+        .ok_or_else(|| (StatusCode::UNAUTHORIZED, Json(json!({"error": "Unauthorized"}))))?;
+    let row = sqlx::query(
+        "SELECT id, email, name, role, relationship, is_master_user, created_at FROM frankos_users WHERE id = $1"
+    )
+    .bind(user_id)
+    .fetch_optional(&state.db).await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?
+    .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "User not found"}))))?;
+    let created_at: chrono::DateTime<chrono::Utc> = row.try_get("created_at").unwrap_or_default();
+    Ok(Json(json!({
+        "id": row.try_get::<Uuid, _>("id").unwrap_or_default().to_string(),
+        "email": row.try_get::<String, _>("email").unwrap_or_default(),
+        "name": row.try_get::<String, _>("name").unwrap_or_default(),
+        "role": row.try_get::<String, _>("role").unwrap_or_default(),
+        "relationship": row.try_get::<String, _>("relationship").unwrap_or_default(),
+        "is_master_user": row.try_get::<bool, _>("is_master_user").unwrap_or(false),
+        "created_at": created_at.to_rfc3339(),
+    })))
+}
+
+#[derive(Deserialize)]
+struct UpdateMeRequest { name: Option<String> }
+
+async fn patch_me(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<UpdateMeRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let (user_id, _, _) = extract_user(&headers, &state.config.jwt_secret)
+        .ok_or_else(|| (StatusCode::UNAUTHORIZED, Json(json!({"error": "Unauthorized"}))))?;
+    if let Some(name) = &req.name {
+        sqlx::query("UPDATE frankos_users SET name = $1, updated_at = NOW() WHERE id = $2")
+            .bind(name).bind(user_id)
+            .execute(&state.db).await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+    }
+    let row = sqlx::query(
+        "SELECT id, email, name, role, relationship, is_master_user, created_at FROM frankos_users WHERE id = $1"
+    )
+    .bind(user_id)
+    .fetch_one(&state.db).await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+    let created_at: chrono::DateTime<chrono::Utc> = row.try_get("created_at").unwrap_or_default();
+    Ok(Json(json!({
+        "id": row.try_get::<Uuid, _>("id").unwrap_or_default().to_string(),
+        "email": row.try_get::<String, _>("email").unwrap_or_default(),
+        "name": row.try_get::<String, _>("name").unwrap_or_default(),
+        "role": row.try_get::<String, _>("role").unwrap_or_default(),
+        "relationship": row.try_get::<String, _>("relationship").unwrap_or_default(),
+        "is_master_user": row.try_get::<bool, _>("is_master_user").unwrap_or(false),
+        "created_at": created_at.to_rfc3339(),
+    })))
+}
+
+async fn auth_logout(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let (user_id, _, _) = extract_user(&headers, &state.config.jwt_secret)
+        .ok_or_else(|| (StatusCode::UNAUTHORIZED, Json(json!({"error": "Unauthorized"}))))?;
+    // Revoke the most recent active session for this user
+    let revoked = sqlx::query_scalar::<_, i64>(
+        "UPDATE frankos_sessions SET revoked_at = NOW()
+         WHERE user_id = $1 AND revoked_at IS NULL AND expires_at > NOW()
+         RETURNING 1"
+    )
+    .bind(user_id)
+    .fetch_all(&state.db).await
+    .map(|rows| rows.len() as i64)
+    .unwrap_or(0);
+    Ok(Json(json!({ "ok": true, "sessions_revoked": revoked })))
+}
+
+#[derive(Deserialize)]
+struct RefreshRequest { refresh_token: String }
+
+async fn auth_refresh(
+    State(state): State<AppState>,
+    Json(req): Json<RefreshRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let hashed = hash_token(&req.refresh_token);
+    let row = sqlx::query(
+        "SELECT user_id FROM frank_refresh_tokens
+         WHERE token_hash = $1 AND revoked_at IS NULL AND expires_at > NOW()"
+    )
+    .bind(&hashed)
+    .fetch_optional(&state.db).await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?
+    .ok_or_else(|| (StatusCode::UNAUTHORIZED, Json(json!({"error": "Invalid or expired refresh token"}))))?;
+
+    let user_id: Uuid = row.try_get("user_id")
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+
+    // Rotate: revoke old token
+    sqlx::query("UPDATE frank_refresh_tokens SET revoked_at = NOW() WHERE token_hash = $1")
+        .bind(&hashed).execute(&state.db).await.ok();
+
+    // Get user details
+    let user_row = sqlx::query(
+        "SELECT email, role FROM frankos_users WHERE id = $1"
+    )
+    .bind(user_id).fetch_one(&state.db).await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+    let email: String = user_row.try_get("email").unwrap_or_default();
+    let role: String = user_row.try_get("role").unwrap_or_default();
+
+    let new_jwt = auth::create_token(&user_id, &email, &role, &state.config.jwt_secret)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+    let new_refresh = store_refresh_token(&state.db, user_id).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+
+    Ok(Json(json!({ "token": new_jwt, "refresh_token": new_refresh })))
+}
+
+// ── Admin Endpoints (Gap 7) ────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct UpdateUserRequest {
+    role: Option<String>,
+    relationship: Option<String>,
+}
+
+async fn admin_list_users(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    require_master_user(&headers, &state.config.jwt_secret)
+        .ok_or_else(|| (StatusCode::FORBIDDEN, Json(json!({"error": "Forbidden"}))))?;
+    
+    let rows = sqlx::query(
+        "SELECT id, email, name, role, relationship, is_master_user, created_at FROM frankos_users ORDER BY created_at"
+    )
+    .fetch_all(&state.db).await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+    
+    let users: Vec<Value> = rows.iter().map(|r| {
+        let created_at: chrono::DateTime<chrono::Utc> = r.try_get("created_at").unwrap_or_default();
+        json!({
+            "id": r.try_get::<Uuid, _>("id").unwrap_or_default().to_string(),
+            "email": r.try_get::<String, _>("email").unwrap_or_default(),
+            "name": r.try_get::<String, _>("name").unwrap_or_default(),
+            "role": r.try_get::<String, _>("role").unwrap_or_default(),
+            "relationship": r.try_get::<String, _>("relationship").unwrap_or_default(),
+            "is_master_user": r.try_get::<bool, _>("is_master_user").unwrap_or(false),
+            "created_at": created_at.to_rfc3339(),
+        })
+    }).collect();
+    
+    Ok(Json(json!({ "users": users, "count": users.len() })))
+}
+
+async fn admin_update_user(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(target_id): Path<Uuid>,
+    Json(req): Json<UpdateUserRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    require_master_user(&headers, &state.config.jwt_secret)
+        .ok_or_else(|| (StatusCode::FORBIDDEN, Json(json!({"error": "Forbidden"}))))?;
+    
+    if let Some(role) = &req.role {
+        sqlx::query("UPDATE frankos_users SET role = $1, updated_at = NOW() WHERE id = $2")
+            .bind(role).bind(target_id).execute(&state.db).await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+    }
+    if let Some(rel) = &req.relationship {
+        sqlx::query("UPDATE frankos_users SET relationship = $1, updated_at = NOW() WHERE id = $2")
+            .bind(rel).bind(target_id).execute(&state.db).await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+    }
+    
+    Ok(Json(json!({ "ok": true, "user_id": target_id.to_string() })))
+}
 
 // ── Chat ──────────────────────────────────────────────────────────────────────
 

@@ -37,6 +37,7 @@ cron = "0.12"                          # Nexus cron expression parser
 dashmap = "6"                          # Forge concurrent process map (stable release)
 similar = "2"                          # apply_patch diff / patch engine
 notify = "6"                           # Perception filesystem watcher
+sha2 = "0.10"                          # SHA256 hashing for refresh tokens
 
 [profile.release]
 opt-level = 3
