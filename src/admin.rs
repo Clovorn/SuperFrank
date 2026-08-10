@@ -37,6 +37,7 @@ pub fn admin_router() -> Router<AppState> {
         .route("/admin/health",        get(health_check))
         // Usage stats
         .route("/admin/stats",         get(usage_stats))
+        .route("/engineer/status",     get(engineer_status_handler))
 }
 
 fn require_master(headers: &HeaderMap, secret: &str) -> Result<Uuid, (StatusCode, Json<Value>)> {
