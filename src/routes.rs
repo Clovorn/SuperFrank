@@ -148,11 +148,11 @@ async fn auth_login(
     let email: String = row.try_get("email").unwrap_or_default();
     let name: String = row.try_get("name").unwrap_or_default();
 
-    let token = auth::create_token(&user_id, &email, "user", &state.config.jwt_secret)
+    let role_str: String = row.try_get("role").unwrap_or_else(|_| "user".to_string());
+    let token = auth::create_token(&user_id, &email, &role_str, &state.config.jwt_secret)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
 
     let relationship: String = row.try_get("relationship").unwrap_or_else(|_| "user".to_string());
-    let role_str: String = row.try_get("role").unwrap_or_else(|_| "user".to_string());
     let is_master_user: bool = row.try_get("is_master_user").unwrap_or(false);
 
     let refresh_token = Some(store_refresh_token(&state.db, user_id).await.unwrap_or_default());
