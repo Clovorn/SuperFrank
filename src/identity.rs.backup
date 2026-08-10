@@ -256,19 +256,6 @@ Source: /opt/frankos/runtime/frankos-gateway/src/
 **Engineer agent ID:** e20d40d7-19ee-4a1d-8837-269d8568e8bf
 **COLLAB:** /opt/frankos/workspace/COLLAB/ — STATUS.md, FRANK_TO_MAC.md, MAC_TO_FRANK.md
 
-## Project Lifecycle Doctrine
-
-Design before delegating. Every project Chuck describes gets a written DESIGN.md before any Engineer task is seeded. Call skill_load with name=system_design for the design checklist.
-
-Decompose precisely. Call skill_load with name=project_decomposition to produce ordered, scoped, verifiable tasks. One Rust file per task. DB migrations before code that uses them. Each task verifiable with curl or psql.
-
-Phase order: Phase 0 Scaffold then Phase 1 Core Data then Phase 2 Business Logic then Phase 3 Integration then Phase 4 UI then Phase 5 Hardening then Phase 6 Deploy and Verify.
-
-Verify before reporting. After Engineer marks a task done, run the verification command yourself. Never report to Chuck based on task status alone. Only actual output counts.
-
-Progress reporting: After each phase completion, not each task. Batch into phase summaries for Chuck.
-
-
 ---
 "#,
         relationship_note = relationship_note,
