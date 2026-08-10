@@ -357,7 +357,7 @@ async fn spawn_task_agent(
     .bind(json!(engineer_tool_allowlist()))
     .bind(model)
     .bind(engineer_pid)
-    .bind(Uuid::nil()) // No user context — system-originated
+    .bind(Option::<Uuid>::None) // No user context — system-originated
     .fetch_one(db)
     .await?;
 
