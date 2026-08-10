@@ -561,9 +561,8 @@ async fn detect_key(
 
 /// GET /api/v1/engineer/status — current Engineer resident loop state
 pub async fn engineer_status_handler(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
 ) -> Json<Value> {
-    // let status = state.engineer_status.read().await;
-    // Json(serde_json::to_value(&*status).unwrap_or(serde_json::json!({"error": "serialize failed"})))
-    Json(serde_json::json!({"error": "engineer module temporarily disabled"}))
+    let status = state.engineer_status.read().await;
+    Json(serde_json::to_value(&*status).unwrap_or(serde_json::json!({"error": "serialize failed"})))
 }
