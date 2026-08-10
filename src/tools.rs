@@ -452,6 +452,9 @@ pub fn execute_tool<'a>(
                 .unwrap_or_else(|e| serde_json::json!({"error": e.to_string()}))),
             "task_block" => Ok(crate::task_tools::exec_task_block(input, &ctx.db).await
                 .unwrap_or_else(|e| serde_json::json!({"error": e.to_string()}))),
+            "notify_internal" => exec_notify_internal(input, ctx).await,
+            "notification_inbox" => exec_notification_inbox(input, ctx).await,
+            "notification_ack" => exec_notification_ack(input, ctx).await,
     
             // ── Expanded Capability Pack ──────────────────────────────────────────
             "send_email"            => exec_send_email(input, ctx).await,
@@ -1631,6 +1634,49 @@ pub fn compound_tools() -> Vec<ToolDef> {
                 "required": ["task_id", "reason"]
             }),
         },
+        ToolDef {
+            name: "notify_internal".into(),
+            description: "Write an internal SuperFrank notification to frank_notifications (no external email dependency). Use for progress, blockers, and handoff signals.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "title": { "type": "string", "description": "Short notification title" },
+                    "body": { "type": "string", "description": "Detailed notification text" },
+                    "level": { "type": "string", "description": "info | warning | blocker | success (default info)" },
+                    "source": { "type": "string", "description": "Source label (default agent)" },
+                    "target_user_id": { "type": "string", "description": "Optional user UUID. Defaults to current user." },
+                    "metadata": { "type": "object", "description": "Optional JSON metadata payload" }
+                },
+                "required": ["title", "body"]
+            }),
+        },
+        ToolDef {
+            name: "notification_inbox".into(),
+            description: "Read internal notifications from frank_notifications for the current user.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "status": { "type": "string", "description": "queued | delivered | acknowledged (default queued)" },
+                    "source": { "type": "string", "description": "Optional source filter" },
+                    "limit": { "type": "integer", "description": "Max notifications (default 20, max 100)" }
+                }
+            }),
+        },
+        ToolDef {
+            name: "notification_ack".into(),
+            description: "Acknowledge one or more internal notifications.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "notification_ids": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Array of notification UUIDs"
+                    }
+                },
+                "required": ["notification_ids"]
+            }),
+        },
     ]
 }
 
@@ -2379,6 +2425,150 @@ async fn exec_mailbox_mark_read(input: &Value, ctx: &ToolContext) -> Result<Valu
     .execute(&ctx.db)
     .await?;
     
+    Ok(json!({
+        "success": true,
+        "updated": result.rows_affected()
+    }))
+}
+
+/// Tool: notify_internal — persist an internal notification for SuperFrank workflows
+async fn exec_notify_internal(input: &Value, ctx: &ToolContext) -> Result<Value> {
+    let title = input["title"].as_str().ok_or_else(|| anyhow!("Missing title"))?;
+    let body = input["body"].as_str().ok_or_else(|| anyhow!("Missing body"))?;
+    let level = input["level"].as_str().unwrap_or("info");
+    let source = input["source"].as_str().unwrap_or("agent");
+    let metadata = input.get("metadata").cloned();
+
+    let target_user_id = match input.get("target_user_id").and_then(|v| v.as_str()) {
+        Some(id) => uuid::Uuid::parse_str(id).map_err(|_| anyhow!("Invalid target_user_id UUID"))?,
+        None => ctx.user_id,
+    };
+
+    let notification_id = sqlx::query_scalar::<_, uuid::Uuid>(
+        "INSERT INTO frank_notifications (user_id, source, level, title, body, metadata, status)
+         VALUES ($1, $2, $3, $4, $5, $6, 'queued')
+         RETURNING id"
+    )
+    .bind(target_user_id)
+    .bind(source)
+    .bind(level)
+    .bind(title)
+    .bind(body)
+    .bind(metadata)
+    .fetch_one(&ctx.db)
+    .await?;
+
+    Ok(json!({
+        "success": true,
+        "notification_id": notification_id,
+        "target_user_id": target_user_id,
+        "level": level,
+        "source": source
+    }))
+}
+
+/// Tool: notification_inbox — read internal notifications for the current user
+async fn exec_notification_inbox(input: &Value, ctx: &ToolContext) -> Result<Value> {
+    let status = input["status"].as_str().unwrap_or("queued");
+    let source_filter = input.get("source").and_then(|v| v.as_str());
+    let limit = input["limit"].as_i64().unwrap_or(20).clamp(1, 100) as i64;
+
+    let rows: Vec<(
+        uuid::Uuid,
+        String,
+        String,
+        String,
+        String,
+        Option<Value>,
+        String,
+        Option<String>,
+        chrono::DateTime<chrono::Utc>,
+        Option<chrono::DateTime<chrono::Utc>>,
+        Option<chrono::DateTime<chrono::Utc>>,
+    )> = if let Some(source) = source_filter {
+        sqlx::query_as(
+            "SELECT id, source, level, title, body, metadata, status, delivered_via, created_at, delivered_at, acknowledged_at
+             FROM frank_notifications
+             WHERE user_id = $1 AND status = $2 AND source = $3
+             ORDER BY created_at DESC
+             LIMIT $4"
+        )
+        .bind(ctx.user_id)
+        .bind(status)
+        .bind(source)
+        .bind(limit)
+        .fetch_all(&ctx.db)
+        .await?
+    } else {
+        sqlx::query_as(
+            "SELECT id, source, level, title, body, metadata, status, delivered_via, created_at, delivered_at, acknowledged_at
+             FROM frank_notifications
+             WHERE user_id = $1 AND status = $2
+             ORDER BY created_at DESC
+             LIMIT $3"
+        )
+        .bind(ctx.user_id)
+        .bind(status)
+        .bind(limit)
+        .fetch_all(&ctx.db)
+        .await?
+    };
+
+    let notifications: Vec<Value> = rows
+        .into_iter()
+        .map(|(id, source, level, title, body, metadata, status, delivered_via, created_at, delivered_at, acknowledged_at)| {
+            json!({
+                "id": id,
+                "source": source,
+                "level": level,
+                "title": title,
+                "body": body,
+                "metadata": metadata,
+                "status": status,
+                "delivered_via": delivered_via,
+                "created_at": created_at.to_rfc3339(),
+                "delivered_at": delivered_at.map(|v| v.to_rfc3339()),
+                "acknowledged_at": acknowledged_at.map(|v| v.to_rfc3339())
+            })
+        })
+        .collect();
+
+    Ok(json!({
+        "success": true,
+        "count": notifications.len(),
+        "notifications": notifications
+    }))
+}
+
+/// Tool: notification_ack — acknowledge notification IDs
+async fn exec_notification_ack(input: &Value, ctx: &ToolContext) -> Result<Value> {
+    let ids = input["notification_ids"]
+        .as_array()
+        .ok_or_else(|| anyhow!("Missing notification_ids"))?;
+
+    let mut parsed_ids = Vec::with_capacity(ids.len());
+    for id in ids {
+        let s = id.as_str().ok_or_else(|| anyhow!("notification_ids must be strings"))?;
+        parsed_ids.push(uuid::Uuid::parse_str(s).map_err(|_| anyhow!("Invalid notification UUID: {}", s))?);
+    }
+
+    if parsed_ids.is_empty() {
+        return Ok(json!({
+            "success": false,
+            "error": "No notification IDs provided"
+        }));
+    }
+
+    let result = sqlx::query(
+        "UPDATE frank_notifications
+         SET status = 'acknowledged', acknowledged_at = NOW()
+         WHERE user_id = $1 AND id = ANY($2::uuid[])"
+    )
+    .bind(ctx.user_id)
+    .bind(&parsed_ids)
+    .execute(&ctx.db)
+    .await?;
+
     Ok(json!({
         "success": true,
         "updated": result.rows_affected()

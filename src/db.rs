@@ -510,3 +510,37 @@ pub async fn run_v12_migrations(pool: &sqlx::PgPool) -> anyhow::Result<()> {
     tracing::info!("v12 migrations complete — task_change trigger installed");
     Ok(())
 }
+
+pub async fn run_v13_migrations(pool: &sqlx::PgPool) -> anyhow::Result<()> {
+    tracing::info!("Running v13 migrations (internal notifications bus)...");
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS frank_notifications (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            user_id UUID NOT NULL REFERENCES frankos_users(id) ON DELETE CASCADE,
+            source TEXT NOT NULL DEFAULT 'system',
+            level TEXT NOT NULL DEFAULT 'info',
+            title TEXT NOT NULL,
+            body TEXT NOT NULL,
+            metadata JSONB,
+            status TEXT NOT NULL DEFAULT 'queued',
+            delivered_via TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            delivered_at TIMESTAMPTZ,
+            acknowledged_at TIMESTAMPTZ
+        )"
+    ).execute(pool).await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_frank_notifications_user_status_created
+         ON frank_notifications(user_id, status, created_at DESC)"
+    ).execute(pool).await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_frank_notifications_source_created
+         ON frank_notifications(source, created_at DESC)"
+    ).execute(pool).await?;
+
+    tracing::info!("v13 migrations complete");
+    Ok(())
+}

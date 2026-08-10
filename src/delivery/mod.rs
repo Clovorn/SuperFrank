@@ -73,8 +73,14 @@ impl DeliveryBus {
         }
     }
 
-    /// Notify a user. Tries SSE first; falls back to email if no active session.
+    /// Notify a user through the internal bus.
+    /// Behavior:
+    /// 1) Persist in frank_notifications
+    /// 2) Attempt live SSE delivery
+    /// 3) Keep queued for later retrieval if no active session
     pub async fn notify_user(&self, user_id: Uuid, title: &str, body: &str) -> Result<()> {
+        let notif_id = self.store_notification(user_id, "delivery_bus", "info", title, body, None).await?;
+
         // Find the user's most recent active session
         let session_id = sqlx::query_scalar::<_, Uuid>(
             "SELECT id FROM frankos_sessions
@@ -92,13 +98,56 @@ impl DeliveryBus {
             ).await;
 
             if delivered {
+                self.mark_notification_delivered(notif_id, "sse").await?;
                 info!("[Delivery] Notification delivered via SSE to session {}", sid);
                 return Ok(());
             }
         }
 
-        // Fall back to email
-        self.send_email_to_user(user_id, title, body).await
+        info!("[Delivery] Notification queued (no active SSE session) for user {}", user_id);
+        Ok(())
+    }
+
+    pub async fn store_notification(
+        &self,
+        user_id: Uuid,
+        source: &str,
+        level: &str,
+        title: &str,
+        body: &str,
+        metadata: Option<Value>,
+    ) -> Result<Uuid> {
+        let id = sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO frank_notifications (user_id, source, level, title, body, metadata, status)
+             VALUES ($1, $2, $3, $4, $5, $6, 'queued')
+             RETURNING id"
+        )
+        .bind(user_id)
+        .bind(source)
+        .bind(level)
+        .bind(title)
+        .bind(body)
+        .bind(metadata)
+        .fetch_one(&self.db)
+        .await?;
+
+        Ok(id)
+    }
+
+    pub async fn mark_notification_delivered(&self, notification_id: Uuid, via: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE frank_notifications
+             SET status = 'delivered',
+                 delivered_via = $2,
+                 delivered_at = NOW()
+             WHERE id = $1"
+        )
+        .bind(notification_id)
+        .bind(via)
+        .execute(&self.db)
+        .await?;
+
+        Ok(())
     }
 
     /// Send email to a user via Resend.
