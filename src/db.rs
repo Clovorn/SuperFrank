@@ -562,3 +562,38 @@ pub async fn run_v14_migrations(pool: &sqlx::PgPool) -> anyhow::Result<()> {
     tracing::info!("v14 migrations complete — frank_refresh_tokens created");
     Ok(())
 }
+
+// ── v15 migrations — Gap 8 · P8A · DB Migration ───────────────────────────────
+
+pub async fn run_v15_migrations(pool: &sqlx::PgPool) -> anyhow::Result<()> {
+    tracing::info!("Running v15 migrations (Gap 8: swarm coordination — retry_count, blocked_reason, WAITING status, frank_task_events)...");
+
+    // 1. Add retry_count and blocked_reason columns to frank_tasks
+    let _ = sqlx::query("ALTER TABLE frank_tasks ADD COLUMN IF NOT EXISTS retry_count INTEGER DEFAULT 0").execute(pool).await;
+    let _ = sqlx::query("ALTER TABLE frank_tasks ADD COLUMN IF NOT EXISTS blocked_reason TEXT").execute(pool).await;
+
+    // 2. Update frank_tasks status CHECK constraint to allow WAITING
+    let _ = sqlx::query("ALTER TABLE frank_tasks DROP CONSTRAINT IF EXISTS frank_tasks_status_check").execute(pool).await;
+    sqlx::query("
+        ALTER TABLE frank_tasks ADD CONSTRAINT frank_tasks_status_check
+        CHECK (status = ANY (ARRAY['PENDING','ASSIGNED','IN_PROGRESS','BLOCKED','COMPLETE','CANCELLED','WAITING']))
+    ").execute(pool).await?;
+
+    // 3. Create frank_task_events table
+    sqlx::query("
+        CREATE TABLE IF NOT EXISTS frank_task_events (
+            event_id   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            task_id    UUID NOT NULL REFERENCES frank_tasks(task_id) ON DELETE CASCADE,
+            event_type TEXT NOT NULL,
+            payload    JSONB,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        )
+    ").execute(pool).await?;
+
+    // Create indexes for frank_task_events
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_task_events_task ON frank_task_events(task_id, created_at)").execute(pool).await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_task_events_type ON frank_task_events(event_type, created_at)").execute(pool).await?;
+
+    tracing::info!("v15 migrations complete — Gap 8 swarm coordination schema ready");
+    Ok(())
+}

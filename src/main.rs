@@ -177,6 +177,7 @@ async fn main() -> Result<()> {
     db::run_v12_migrations(&pool).await?;
     db::run_v13_migrations(&pool).await?;
     db::run_v14_migrations(&pool).await?;
+    db::run_v15_migrations(&pool).await?;
 
     let engineer_status = engineer::new_shared_status();
 
