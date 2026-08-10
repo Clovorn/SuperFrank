@@ -31,7 +31,7 @@ use chrono::Utc;
 /// How often Engineer polls for new tasks
 const POLL_INTERVAL_SECS: u64 = 30;
 /// How long to wait for a spawned agent to complete before moving on
-const AGENT_TIMEOUT_SECS: u64 = 300;
+const AGENT_TIMEOUT_SECS: u64 = 600;
 /// Max concurrent Engineer sub-agents running at once
 const MAX_CONCURRENT: usize = 3;
 
