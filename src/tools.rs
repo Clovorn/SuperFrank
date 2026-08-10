@@ -553,6 +553,8 @@ async fn exec_shell(input: &Value) -> Result<Value> {
             .arg("-c")
             .arg(command)
             .current_dir(workdir)
+            .env("PATH", "/root/.cargo/bin:/root/.nvm/versions/node/v22.23.2/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+            .env("HOME", "/root")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
