@@ -98,6 +98,25 @@ pub async fn recall(
     ).bind(namespace).fetch_all(pool).await.unwrap_or_default();
     ctx.build_state = rows_to_entries(build_state_rows);
 
+    // Inject RUNBOOK.md as a high-priority build_state entry if it exists
+    if let Ok(runbook) = tokio::fs::read_to_string("/opt/frankos/workspace/RUNBOOK.md").await {
+        let runbook_trimmed = if runbook.len() > 6000 {
+            runbook[..6000].to_string() + "\n...[RUNBOOK truncated — read full file with file_read /opt/frankos/workspace/RUNBOOK.md]"
+        } else {
+            runbook
+        };
+        ctx.build_state.insert(0, MemoryEntry {
+            id: uuid::Uuid::nil(),
+            bucket: "build_state".to_string(),
+            namespace: namespace.to_string(),
+            memory_type: "runbook".to_string(),
+            title: "RUNBOOK — Operational Reference".to_string(),
+            content: runbook_trimmed,
+            importance: 10,
+            tags: vec!["runbook".to_string(), "operational".to_string()],
+        });
+    }
+
     Ok(ctx)
 }
 

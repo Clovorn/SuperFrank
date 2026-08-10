@@ -346,16 +346,25 @@ async fn stream_message(
         // Agentic loop — stream, execute tools, loop back with results
         let mut conv_messages = messages.clone();
         let mut full_response = String::new();
+        
+        // ── INTELLIGENT MODEL ROUTING ────────────────────────────────────────
+        // Start with Haiku (cheaper, faster for initial tool calls)
+        // Switch to Sonnet when we need final reasoning/writing
+        let haiku_model = "claude-haiku-4-5";
+        let sonnet_model = "claude-sonnet-4-5";
+        let mut current_model = haiku_model.to_string();
+        
+        tracing::info!("Model routing initialized: starting with {}", current_model);
 
         'agent: for iteration in 0..120 {
             let iter_tx = tx.clone();
-            tracing::info!("Agent iteration {}", iteration);
+            tracing::info!("Agent iteration {} using model {}", iteration, current_model);
             let _ = tx.send(StreamEvent::Iteration { num: iteration as u32 }).await;
 
             // Stream this turn — returns text + any tool calls Anthropic wants
             let turn_result = llm.stream_with_tools_and_calls(
                 &provider,
-                &model_str_clone,
+                &current_model,  // Use the dynamically selected model
                 &system,
                 conv_messages.clone(),
                 16000,
@@ -374,8 +383,17 @@ async fn stream_message(
                     }
 
                     if tool_calls.is_empty() {
-                        // No tool calls — done
+                        // No tool calls — this is the final reasoning/response turn
+                        // We're done with the agentic loop
+                        tracing::info!("No tool calls, final response complete with {}", current_model);
                         break 'agent;
+                    }
+
+                    // Tool calls present — switch to Haiku for the next tool-execution iteration
+                    // (we don't need Sonnet's reasoning power to just process tool results)
+                    if current_model != haiku_model {
+                        tracing::info!("Switching to {} for tool-execution iteration", haiku_model);
+                        current_model = haiku_model.to_string();
                     }
 
                     // Build the assistant message with tool_use blocks for history
@@ -443,6 +461,16 @@ async fn stream_message(
                         role: "user".to_string(),
                         content: serde_json::to_string(&tool_result_content).unwrap_or_default(),
                     });
+                    
+                    // After processing tool results, check if we should switch to Sonnet
+                    // for the next iteration (when we need reasoning on tool outputs)
+                    // Heuristic: if we have accumulated text or this is not the first iteration,
+                    // switch to Sonnet to process results and potentially give final answer
+                    if iteration > 0 && current_model == haiku_model {
+                        tracing::info!("Switching to {} for reasoning on tool results", sonnet_model);
+                        current_model = sonnet_model.to_string();
+                    }
+                    
                     // Loop back — let Frank process the tool results
                 }
             }

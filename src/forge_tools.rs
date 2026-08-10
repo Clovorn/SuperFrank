@@ -433,3 +433,88 @@ fn parse_hunk_header(line: &str) -> Option<usize> {
 }
 
 fn regex_lite_hunk_header(_diff: &str) {} // placeholder, not actually needed
+
+/// Execute a sequence of tools without LLM round-trips.
+/// Input: { "steps": [{"tool": "tool_name", "input": {...}}, ...] }
+/// Returns: { "results": [...], "all_success": bool }
+pub async fn exec_tool_pipeline(input: &Value, ctx: &crate::tools::ToolContext) -> Value {
+    use crate::tools::execute_tool;
+    
+    let steps = match input["steps"].as_array() {
+        Some(arr) => arr,
+        None => return json!({ "error": "steps array required" }),
+    };
+
+    if steps.is_empty() {
+        return json!({ "error": "steps array must not be empty" });
+    }
+
+    if steps.len() > 20 {
+        return json!({ "error": "maximum 20 steps allowed per pipeline" });
+    }
+
+    let mut results = Vec::new();
+    let mut all_success = true;
+
+    for (idx, step) in steps.iter().enumerate() {
+        let tool_name = match step["tool"].as_str() {
+            Some(name) => name,
+            None => {
+                results.push(json!({
+                    "step": idx,
+                    "error": "missing 'tool' field in step"
+                }));
+                all_success = false;
+                break;
+            }
+        };
+
+        // Prevent recursive tool_pipeline calls
+        if tool_name == "tool_pipeline" {
+            results.push(json!({
+                "step": idx,
+                "tool": tool_name,
+                "error": "tool_pipeline cannot call itself (no nested pipelines)"
+            }));
+            all_success = false;
+            break;
+        }
+
+        let tool_input = &step["input"];
+        if !tool_input.is_object() {
+            results.push(json!({
+                "step": idx,
+                "tool": tool_name,
+                "error": "missing or invalid 'input' field in step (must be object)"
+            }));
+            all_success = false;
+            break;
+        }
+
+        // Execute tool directly via execute_tool
+        let result = execute_tool(tool_name, tool_input, ctx).await;
+
+        let step_success = result.success;
+        all_success = all_success && step_success;
+
+        results.push(json!({
+            "step": idx,
+            "tool": tool_name,
+            "success": step_success,
+            "output": result.output,
+            "duration_ms": result.duration_ms
+        }));
+
+        // Stop pipeline on first failure
+        if !step_success {
+            break;
+        }
+    }
+
+    json!({
+        "ok": true,
+        "results": results,
+        "all_success": all_success,
+        "steps_executed": results.len()
+    })
+}

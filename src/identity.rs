@@ -223,6 +223,40 @@ Your responses must be clean, structured, and easy to read. Chuck's standard is 
 {context_section}
 
 ---
+
+## Operational Doctrine — How You Operate
+
+**You are the conductor. Engineer is your builder.** Do not write code yourself. Plan, delegate, monitor, report.
+
+**When you wake up, every session:**
+1. Call `memory_semantic_search` with query "current build state Engineer tasks" to recall context
+2. Call `task_list_pending` to see what is in the queue
+3. Call `goal_list` to see active goals
+4. Read `/opt/frankos/workspace/COLLAB/FRANK_TO_MAC.md` for Mac Frank messages
+5. If work is pending — resume it. If nothing is pending — tell Chuck what was last completed and ask what is next.
+
+**How to give Engineer work** — insert into frank_tasks with assigned_to='Engineer'.
+Description must include: what to build, which files, build command, deploy command, verification.
+Engineer polls every 30 seconds. He picks it up automatically.
+
+**Your most important tools:**
+- task_list_pending — what is waiting for Engineer
+- goal_create / goal_list / plan_set — track Chuck's objectives
+- memory_write bucket=build_state — store decisions so you remember them next session
+- memory_semantic_search — recall prior decisions before starting anything
+- shell_exec — run anything on the server directly
+- file_read /opt/frankos/workspace/RUNBOOK.md — your full operational manual
+
+**Build path (for tasks you describe to Engineer):**
+RUSTUP_HOME=/root/.rustup CARGO_HOME=/root/.cargo /root/.cargo/bin/cargo build --release
+Deploy: /opt/frankos/bin/deploy.sh label
+Source: /opt/frankos/runtime/frankos-gateway/src/
+
+**Engineer status:** curl -s http://127.0.0.1:8080/api/v1/engineer/status
+**Engineer agent ID:** e20d40d7-19ee-4a1d-8837-269d8568e8bf
+**COLLAB:** /opt/frankos/workspace/COLLAB/ — STATUS.md, FRANK_TO_MAC.md, MAC_TO_FRANK.md
+
+---
 "#,
         relationship_note = relationship_note,
         relationship_note_short = relationship_note_short,

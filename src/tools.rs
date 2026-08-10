@@ -340,197 +340,199 @@ pub struct ToolResult {
     pub duration_ms: u64,
 }
 
-pub async fn execute_tool(
+pub fn execute_tool<'a>(
 
-    tool_name: &str,
-    input: &Value,
-    ctx: &ToolContext,
-) -> ToolResult {
-    let start = std::time::Instant::now();
-    info!("Executing tool: {} with input: {}", tool_name, input);
-
-    // Gap 8B.5: Wrap entire tool dispatch in panic handler
-    let result = std::panic::AssertUnwindSafe(async {
-        match tool_name {
-        "shell_exec"   => exec_shell(input).await,
-        "file_read"    => exec_file_read(input).await,
-        "file_write"   => {
-            let result = exec_file_write(input).await;
-            // Gap 7D: Auto-memory after architecture file writes
-            if let Ok(ref output) = result {
-                if let Some(path) = input["path"].as_str() {
-                    let goal_id = get_active_goal_id(&ctx.db, ctx.user_id).await;
-                    let db = ctx.db.clone();
-                    let path = path.to_string();
-                    tokio::spawn(async move {
-                        crate::auto_memory::after_architecture_write(&db, &path, goal_id).await;
-                    });
-                }
-            }
-            result
-        }
-        "file_edit"    => exec_file_edit(input).await,
-        "file_list"    => exec_file_list(input).await,
-        "git_status"   => exec_git(input, "status").await,
-        "git_commit"   => exec_git_commit(input).await,
-        "web_search"   => exec_web_search(input, ctx.brave_api_key.as_deref()).await,
-        "web_fetch"    => exec_web_fetch(input).await,
-        "memory_write"  => exec_memory_write(input, ctx).await,
-        "memory_search" => exec_memory_search(input, ctx).await,
-        "memory_search_semantic" => exec_memory_search_semantic(input, ctx).await,
-        "memory_list"   => exec_memory_list(input, ctx).await,
-        "memory_update" => exec_memory_update(input, ctx).await,
-        "memory_delete" => exec_memory_delete(input, ctx).await,
-        "memory_move"   => exec_memory_move(input, ctx).await,
-        "spawn_agent"  => exec_spawn_agent(input, ctx).await,
-        "service_ctl"  => {
-            let result = exec_service_ctl(input).await;
-            // Gap 7D: Auto-memory after service restart
-            if let Ok(ref output) = result {
-                if let (Some(service), Some(action)) = (input["service"].as_str(), input["action"].as_str()) {
-                    if action == "restart" && output["exit_code"].as_i64() == Some(0) {
-                        let goal_id = get_active_goal_id(&ctx.db, ctx.user_id).await;
-                        let db = ctx.db.clone();
-                        let service = service.to_string();
-                        tokio::spawn(async move {
-                            crate::auto_memory::after_service_restart(&db, &service, true, goal_id).await;
-                        });
-                    }
-                }
-            }
-            result
-        }
-        "cargo_build"  => {
-            let result = exec_cargo_build(input).await;
-            // Gap 7D: Auto-memory after successful build
-            if let Ok(ref output) = result {
-                if output["success"].as_bool() == Some(true) {
+    tool_name: &'a str,
+    input: &'a Value,
+    ctx: &'a ToolContext,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + 'a>> {
+    Box::pin(async move {
+        let start = std::time::Instant::now();
+        info!("Executing tool: {} with input: {}", tool_name, input);
+    
+        // Gap 8B.5: Wrap entire tool dispatch in panic handler
+        let result = std::panic::AssertUnwindSafe(async {
+            match tool_name {
+            "shell_exec"   => exec_shell(input).await,
+            "file_read"    => exec_file_read(input).await,
+            "file_write"   => {
+                let result = exec_file_write(input).await;
+                // Gap 7D: Auto-memory after architecture file writes
+                if let Ok(ref output) = result {
                     if let Some(path) = input["path"].as_str() {
                         let goal_id = get_active_goal_id(&ctx.db, ctx.user_id).await;
                         let db = ctx.db.clone();
                         let path = path.to_string();
                         tokio::spawn(async move {
-                            crate::auto_memory::after_cargo_build(&db, &path, true, goal_id).await;
+                            crate::auto_memory::after_architecture_write(&db, &path, goal_id).await;
                         });
                     }
                 }
+                result
             }
-            result
-        }
-        "process_list"    => exec_process_list(input).await,
-        "generate_image"  => exec_generate_image(input, ctx).await,
-        "generate_video"  => exec_generate_video(input, ctx).await,
-        "analyze_image"   => exec_analyze_image(input, ctx).await,
-        "gemini_research" => exec_gemini_research(input, ctx).await,
-        "gemini_chat"          => exec_gemini_chat(input, ctx).await,
-        "luma_text_to_video"   => exec_luma_text_to_video(input, ctx).await,
-        "luma_image_to_video"  => exec_luma_image_to_video(input, ctx).await,
-        "luma_text_to_image"   => exec_luma_text_to_image(input, ctx).await,
-        "luma_image_reference" => exec_luma_image_reference(input, ctx).await,
-        "luma_style_reference" => exec_luma_style_reference(input, ctx).await,
-        "luma_list_concepts"   => exec_luma_list_concepts(ctx).await,
-        "luma_list_generations"=> exec_luma_list_generations(input, ctx).await,
-        
-        // Gap 10A: Compound Internal Tools
-        "build_and_deploy"  => exec_build_and_deploy(input).await,
-        "db_migration"      => exec_db_migration(input, ctx).await,
-        "agent_spawn"       => exec_agent_spawn_fixed(input, ctx).await,
-        "memory_commit"     => exec_memory_commit(input, ctx).await,
-        
-        // Gap 10B: Escalation Mailbox Tools
-        "mailbox_write"     => exec_mailbox_write(input, ctx).await,
-        "mailbox_read"      => exec_mailbox_read(input, ctx).await,
-        "mailbox_mark_read" => exec_mailbox_mark_read(input, ctx).await,
-
-        // Task management tools — Engineer task queue
-        "task_list_pending" => Ok(crate::task_tools::exec_task_list_pending(&ctx.db).await
-            .unwrap_or_else(|e| serde_json::json!({"error": e.to_string()}))),
-        "task_claim" => Ok(crate::task_tools::exec_task_claim(input, &ctx.db).await
-            .unwrap_or_else(|e| serde_json::json!({"error": e.to_string()}))),
-        "task_done" => Ok(crate::task_tools::exec_task_done(input, &ctx.db).await
-            .unwrap_or_else(|e| serde_json::json!({"error": e.to_string()}))),
-        "task_block" => Ok(crate::task_tools::exec_task_block(input, &ctx.db).await
-            .unwrap_or_else(|e| serde_json::json!({"error": e.to_string()}))),
-
-        // ── Expanded Capability Pack ──────────────────────────────────────────
-        "send_email"            => exec_send_email(input, ctx).await,
-        "github_list_repos"     => exec_github_list_repos(input, ctx).await,
-        "github_get_repo"       => exec_github_get_repo(input, ctx).await,
-        "github_list_issues"    => exec_github_list_issues(input, ctx).await,
-        "github_create_issue"   => exec_github_create_issue(input, ctx).await,
-        "github_list_prs"       => exec_github_list_prs(input, ctx).await,
-        "github_create_pr"      => exec_github_create_pr(input, ctx).await,
-        "github_get_file"       => exec_github_get_file(input, ctx).await,
-        "github_search_code"    => exec_github_search_code(input, ctx).await,
-        "cf_list_dns"           => exec_cf_list_dns(input, ctx).await,
-        "cf_create_dns"         => exec_cf_create_dns(input, ctx).await,
-        "cf_delete_dns"         => exec_cf_delete_dns(input, ctx).await,
-        "cf_purge_cache"        => exec_cf_purge_cache(input, ctx).await,
-        "hetzner_list_servers"  => exec_hetzner_list_servers(input, ctx).await,
-        "hetzner_get_server"    => exec_hetzner_get_server(input, ctx).await,
-        "hetzner_server_action" => exec_hetzner_server_action(input, ctx).await,
-        "get_weather"           => exec_get_weather(input, ctx).await,
-        "notion_search"         => exec_notion_search(input, ctx).await,
-        "notion_get_page"       => exec_notion_get_page(input, ctx).await,
-        "notion_create_page"    => exec_notion_create_page(input, ctx).await,
-        "notion_append_block"   => exec_notion_append_block(input, ctx).await,
-        "generate_image_openai" => exec_generate_image_openai(input, ctx).await,
-        "make_diagram"          => exec_make_diagram(input, ctx).await,
-        "summarize"             => exec_summarize(input, ctx).await,
-
-        other => {
-            // Try v3 tools (Forge, Nexus, apply_patch)
-            match execute_v3_tool(other, input, ctx).await {
-                Some(output) => Ok(output),
-                None => Err(anyhow!("Unknown tool: {}", other)),
+            "file_edit"    => exec_file_edit(input).await,
+            "file_list"    => exec_file_list(input).await,
+            "git_status"   => exec_git(input, "status").await,
+            "git_commit"   => exec_git_commit(input).await,
+            "web_search"   => exec_web_search(input, ctx.brave_api_key.as_deref()).await,
+            "web_fetch"    => exec_web_fetch(input).await,
+            "memory_write"  => exec_memory_write(input, ctx).await,
+            "memory_search" => exec_memory_search(input, ctx).await,
+            "memory_search_semantic" => exec_memory_search_semantic(input, ctx).await,
+            "memory_list"   => exec_memory_list(input, ctx).await,
+            "memory_update" => exec_memory_update(input, ctx).await,
+            "memory_delete" => exec_memory_delete(input, ctx).await,
+            "memory_move"   => exec_memory_move(input, ctx).await,
+            "spawn_agent"  => exec_spawn_agent(input, ctx).await,
+            "service_ctl"  => {
+                let result = exec_service_ctl(input).await;
+                // Gap 7D: Auto-memory after service restart
+                if let Ok(ref output) = result {
+                    if let (Some(service), Some(action)) = (input["service"].as_str(), input["action"].as_str()) {
+                        if action == "restart" && output["exit_code"].as_i64() == Some(0) {
+                            let goal_id = get_active_goal_id(&ctx.db, ctx.user_id).await;
+                            let db = ctx.db.clone();
+                            let service = service.to_string();
+                            tokio::spawn(async move {
+                                crate::auto_memory::after_service_restart(&db, &service, true, goal_id).await;
+                            });
+                        }
+                    }
+                }
+                result
+            }
+            "cargo_build"  => {
+                let result = exec_cargo_build(input).await;
+                // Gap 7D: Auto-memory after successful build
+                if let Ok(ref output) = result {
+                    if output["success"].as_bool() == Some(true) {
+                        if let Some(path) = input["path"].as_str() {
+                            let goal_id = get_active_goal_id(&ctx.db, ctx.user_id).await;
+                            let db = ctx.db.clone();
+                            let path = path.to_string();
+                            tokio::spawn(async move {
+                                crate::auto_memory::after_cargo_build(&db, &path, true, goal_id).await;
+                            });
+                        }
+                    }
+                }
+                result
+            }
+            "process_list"    => exec_process_list(input).await,
+            "generate_image"  => exec_generate_image(input, ctx).await,
+            "generate_video"  => exec_generate_video(input, ctx).await,
+            "analyze_image"   => exec_analyze_image(input, ctx).await,
+            "gemini_research" => exec_gemini_research(input, ctx).await,
+            "gemini_chat"          => exec_gemini_chat(input, ctx).await,
+            "luma_text_to_video"   => exec_luma_text_to_video(input, ctx).await,
+            "luma_image_to_video"  => exec_luma_image_to_video(input, ctx).await,
+            "luma_text_to_image"   => exec_luma_text_to_image(input, ctx).await,
+            "luma_image_reference" => exec_luma_image_reference(input, ctx).await,
+            "luma_style_reference" => exec_luma_style_reference(input, ctx).await,
+            "luma_list_concepts"   => exec_luma_list_concepts(ctx).await,
+            "luma_list_generations"=> exec_luma_list_generations(input, ctx).await,
+            
+            // Gap 10A: Compound Internal Tools
+            "build_and_deploy"  => exec_build_and_deploy(input).await,
+            "db_migration"      => exec_db_migration(input, ctx).await,
+            "agent_spawn"       => exec_agent_spawn_fixed(input, ctx).await,
+            "memory_commit"     => exec_memory_commit(input, ctx).await,
+            
+            // Gap 10B: Escalation Mailbox Tools
+            "mailbox_write"     => exec_mailbox_write(input, ctx).await,
+            "mailbox_read"      => exec_mailbox_read(input, ctx).await,
+            "mailbox_mark_read" => exec_mailbox_mark_read(input, ctx).await,
+    
+            // Task management tools — Engineer task queue
+            "task_list_pending" => Ok(crate::task_tools::exec_task_list_pending(&ctx.db).await
+                .unwrap_or_else(|e| serde_json::json!({"error": e.to_string()}))),
+            "task_claim" => Ok(crate::task_tools::exec_task_claim(input, &ctx.db).await
+                .unwrap_or_else(|e| serde_json::json!({"error": e.to_string()}))),
+            "task_done" => Ok(crate::task_tools::exec_task_done(input, &ctx.db).await
+                .unwrap_or_else(|e| serde_json::json!({"error": e.to_string()}))),
+            "task_block" => Ok(crate::task_tools::exec_task_block(input, &ctx.db).await
+                .unwrap_or_else(|e| serde_json::json!({"error": e.to_string()}))),
+    
+            // ── Expanded Capability Pack ──────────────────────────────────────────
+            "send_email"            => exec_send_email(input, ctx).await,
+            "github_list_repos"     => exec_github_list_repos(input, ctx).await,
+            "github_get_repo"       => exec_github_get_repo(input, ctx).await,
+            "github_list_issues"    => exec_github_list_issues(input, ctx).await,
+            "github_create_issue"   => exec_github_create_issue(input, ctx).await,
+            "github_list_prs"       => exec_github_list_prs(input, ctx).await,
+            "github_create_pr"      => exec_github_create_pr(input, ctx).await,
+            "github_get_file"       => exec_github_get_file(input, ctx).await,
+            "github_search_code"    => exec_github_search_code(input, ctx).await,
+            "cf_list_dns"           => exec_cf_list_dns(input, ctx).await,
+            "cf_create_dns"         => exec_cf_create_dns(input, ctx).await,
+            "cf_delete_dns"         => exec_cf_delete_dns(input, ctx).await,
+            "cf_purge_cache"        => exec_cf_purge_cache(input, ctx).await,
+            "hetzner_list_servers"  => exec_hetzner_list_servers(input, ctx).await,
+            "hetzner_get_server"    => exec_hetzner_get_server(input, ctx).await,
+            "hetzner_server_action" => exec_hetzner_server_action(input, ctx).await,
+            "get_weather"           => exec_get_weather(input, ctx).await,
+            "notion_search"         => exec_notion_search(input, ctx).await,
+            "notion_get_page"       => exec_notion_get_page(input, ctx).await,
+            "notion_create_page"    => exec_notion_create_page(input, ctx).await,
+            "notion_append_block"   => exec_notion_append_block(input, ctx).await,
+            "generate_image_openai" => exec_generate_image_openai(input, ctx).await,
+            "make_diagram"          => exec_make_diagram(input, ctx).await,
+            "summarize"             => exec_summarize(input, ctx).await,
+    
+            other => {
+                // Try v3 tools (Forge, Nexus, apply_patch)
+                match execute_v3_tool(other, input, ctx).await {
+                    Some(output) => Ok(output),
+                    None => Err(anyhow!("Unknown tool: {}", other)),
+                }
             }
         }
-    }
+        })
+        .catch_unwind()
+        .await;
+    
+        let duration_ms = start.elapsed().as_millis() as u64;
+    
+        // Gap 8B.5: Handle panic vs normal error
+        let final_result = match result {
+            Ok(tool_result) => tool_result, // Normal execution (Ok or Err from tool)
+            Err(panic_info) => {
+                // Tool panicked — log it and return error to agent
+                tracing::error!("Tool '{}' PANICKED: {:?}", tool_name, panic_info);
+                // Gap 8A: emit nexus_panic event
+                let panic_str = format!("{:?}", panic_info);
+                crate::events::emit_tool_failure(
+                    &ctx.db,
+                    tool_name,
+                    &format!("PANIC: {}", { let ci = panic_str.char_indices().nth(200).map(|(i,_)|i).unwrap_or(panic_str.len()); &panic_str[..ci] }),
+                    None,
+                ).await;
+                Err(anyhow!("Tool panicked during execution. Check logs for details."))
+            }
+        };
+    
+        match final_result {
+            Ok(output) => ToolResult { tool_name: tool_name.to_string(), success: true, output, duration_ms },
+            Err(e) => {
+                warn!("Tool {} failed: {}", tool_name, e);
+                // Gap 8A: emit tool_failure event
+                let input_preview = serde_json::to_string(input).ok();
+                let preview = input_preview.as_deref().map(|s| { let ci = s.char_indices().nth(200).map(|(i,_)|i).unwrap_or(s.len()); &s[..ci] });
+                crate::events::emit_tool_failure(
+                    &ctx.db,
+                    tool_name,
+                    &e.to_string(),
+                    preview,
+                ).await;
+                ToolResult {
+                    tool_name: tool_name.to_string(),
+                    success: false,
+                    output: json!({ "error": e.to_string() }),
+                    duration_ms,
+                }
+            }
+        }
     })
-    .catch_unwind()
-    .await;
-
-    let duration_ms = start.elapsed().as_millis() as u64;
-
-    // Gap 8B.5: Handle panic vs normal error
-    let final_result = match result {
-        Ok(tool_result) => tool_result, // Normal execution (Ok or Err from tool)
-        Err(panic_info) => {
-            // Tool panicked — log it and return error to agent
-            tracing::error!("Tool '{}' PANICKED: {:?}", tool_name, panic_info);
-            // Gap 8A: emit nexus_panic event
-            let panic_str = format!("{:?}", panic_info);
-            crate::events::emit_tool_failure(
-                &ctx.db,
-                tool_name,
-                &format!("PANIC: {}", { let ci = panic_str.char_indices().nth(200).map(|(i,_)|i).unwrap_or(panic_str.len()); &panic_str[..ci] }),
-                None,
-            ).await;
-            Err(anyhow!("Tool panicked during execution. Check logs for details."))
-        }
-    };
-
-    match final_result {
-        Ok(output) => ToolResult { tool_name: tool_name.to_string(), success: true, output, duration_ms },
-        Err(e) => {
-            warn!("Tool {} failed: {}", tool_name, e);
-            // Gap 8A: emit tool_failure event
-            let input_preview = serde_json::to_string(input).ok();
-            let preview = input_preview.as_deref().map(|s| { let ci = s.char_indices().nth(200).map(|(i,_)|i).unwrap_or(s.len()); &s[..ci] });
-            crate::events::emit_tool_failure(
-                &ctx.db,
-                tool_name,
-                &e.to_string(),
-                preview,
-            ).await;
-            ToolResult {
-                tool_name: tool_name.to_string(),
-                success: false,
-                output: json!({ "error": e.to_string() }),
-                duration_ms,
-            }
-        }
-    }
 }
 
 // ── Shell Exec ────────────────────────────────────────────────────────────────
@@ -1456,6 +1458,28 @@ pub fn v3_tools() -> Vec<ToolDef> {
                 "required": ["patch"]
             }),
         },
+        ToolDef {
+            name: "tool_pipeline".into(),
+            description: "Execute a sequence of tools without LLM round-trips. Each step runs using execute_tool() directly. Stops on first failure. Use for chaining operations like build → test → deploy.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "steps": {
+                        "type": "array",
+                        "description": "Array of tool steps to execute in sequence",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "tool": { "type": "string", "description": "Tool name to execute" },
+                                "input": { "type": "object", "description": "Input parameters for the tool" }
+                            },
+                            "required": ["tool", "input"]
+                        }
+                    }
+                },
+                "required": ["steps"]
+            }),
+        },
     ]
 }
 
@@ -1719,6 +1743,7 @@ pub async fn execute_v3_tool(name: &str, input: &Value, ctx: &ToolContext) -> Op
             }
             Some(result)
         }
+        "tool_pipeline" => Some(crate::forge_tools::exec_tool_pipeline(input, ctx).await),
         _ => None,
     }
 }

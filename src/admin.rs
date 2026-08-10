@@ -550,6 +550,6 @@ async fn detect_key(
 pub async fn engineer_status_handler(
     State(state): State<AppState>,
 ) -> Json<Value> {
-    let status = state.engineer_status.read().await;
+    let status = state.engineer_status.read().unwrap();
     Json(serde_json::to_value(&*status).unwrap_or(serde_json::json!({"error": "serialize failed"})))
 }

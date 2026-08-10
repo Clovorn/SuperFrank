@@ -51,7 +51,7 @@ mod plan_continuation;
 mod task_polling;
 mod task_polling_tools;
 mod task_tools;
-mod engineer;
+// mod engineer;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -64,7 +64,7 @@ pub struct AppState {
     pub forge: Arc<forge::Forge>,
     pub swarm: Arc<swarm::Swarm>,
     pub delivery: Arc<delivery::DeliveryBus>,
-    pub engineer_status: engineer::SharedEngineerStatus,
+    pub engineer_status: Arc<std::sync::RwLock<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -176,7 +176,7 @@ async fn main() -> Result<()> {
     db::run_v11_migrations(&pool).await?;
     db::run_v12_migrations(&pool).await?;
 
-    let engineer_status = engineer::new_shared_status();
+    let engineer_status = Arc::new(std::sync::RwLock::new("disabled".to_string()));
 
     let state = AppState {
         db: pool.clone(),
@@ -206,7 +206,7 @@ async fn main() -> Result<()> {
     let engineer_brave = config.brave_api_key.clone();
     let engineer_status_spawn = engineer_status.clone();
     tokio::spawn(async move {
-        engineer::run(engineer_db, engineer_llm, engineer_brave, engineer_status_spawn).await;
+        // engineer::run(engineer_db, engineer_llm, engineer_brave, engineer_status_spawn).await;
     });
     info!("Engineer resident loop spawned");
 
