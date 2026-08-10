@@ -67,8 +67,8 @@ async fn run_agent_inner(
     let name: String = row.try_get("name")?;
     let goal: String = row.try_get("goal")?;
     let model_hint: String = row.try_get("model").unwrap_or_else(|_| "haiku".into());
-    let parent_session_id: Uuid = row.try_get("parent_session_id")?;
-    let user_id: Uuid = row.try_get("user_id")?;
+    let parent_session_id: Option<Uuid> = row.try_get("parent_session_id").unwrap_or(None);
+    let user_id: Option<Uuid> = row.try_get("user_id").unwrap_or(None);
     let tools_json: Value = row.try_get("tools_allowed").unwrap_or(json!([]));
 
     let allowed_tools: Vec<String> = tools_json.as_array()
@@ -91,8 +91,8 @@ async fn run_agent_inner(
         luma_api_key: None,
         openai_api_key: None,
         db: db.clone(),
-        session_id: parent_session_id,
-        user_id,
+        session_id: parent_session_id.unwrap_or(Uuid::nil()),
+        user_id: user_id.unwrap_or(Uuid::nil()),
         chat_bucket: "personal".to_string(),
         chat_folder: None,
         forge: None,
