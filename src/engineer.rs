@@ -209,6 +209,16 @@ async fn ensure_engineer_exists(db: &PgPool) -> Result<Uuid> {
     .await?;
 
     if let Some(pid) = existing {
+        // Keep Engineer prompt fresh on every runtime start so training updates apply immediately.
+        sqlx::query(
+            "UPDATE frank_persistent_agents
+             SET system_prompt = $2, updated_at = NOW()
+             WHERE id = $1"
+        )
+        .bind(pid)
+        .bind(engineer_system_prompt())
+        .execute(db)
+        .await?;
         return Ok(pid);
     }
 
