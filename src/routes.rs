@@ -139,15 +139,28 @@ async fn list_sessions(
     let (user_id, _, _) = extract_user(&headers, &state.config.jwt_secret)
         .ok_or_else(|| (StatusCode::UNAUTHORIZED, Json(json!({"error": "Unauthorized"}))))?;
 
+    // Join first user message as session title for sidebar display
     let rows = sqlx::query(
-        "SELECT id, created_at FROM frankos_sessions WHERE user_id = $1 AND revoked_at IS NULL ORDER BY created_at DESC LIMIT 50"
+        "SELECT fs.id,
+                (SELECT content FROM frankos_messages
+                 WHERE session_id = fs.id AND role = 'user'
+                 ORDER BY created_at ASC LIMIT 1) as first_msg
+         FROM frankos_sessions fs
+         WHERE fs.user_id = $1 AND fs.revoked_at IS NULL
+           AND EXISTS (SELECT 1 FROM frankos_messages WHERE session_id = fs.id)
+         ORDER BY fs.created_at DESC LIMIT 50"
     )
     .bind(user_id).fetch_all(&state.db).await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
 
     let sessions: Vec<Value> = rows.iter().map(|r| {
         let id: Uuid = r.try_get("id").unwrap_or_default();
-        json!({ "id": id.to_string() })
+        let raw: Option<String> = r.try_get("first_msg").ok().flatten();
+        let title = raw.as_deref().map(|s| {
+            let s = s.trim();
+            if s.len() > 60 { format!("{}…", &s[..57]) } else { s.to_string() }
+        }).unwrap_or_else(|| "New Conversation".to_string());
+        json!({ "id": id.to_string(), "title": title })
     }).collect();
 
     Ok(Json(json!({ "sessions": sessions })))
