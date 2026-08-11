@@ -32,6 +32,7 @@ pub fn api_router() -> Router<AppState> {
         .route("/activity/live", get(activity_live))
         .route("/memory/search_semantic", post(memory_search_semantic))
         .route("/memory/search_hybrid", post(memory_search_hybrid))
+        .route("/memory/write", post(memory_write))
         .route("/api/v1/memory/build_history", get(memory::get_build_history))
         .route("/api/v1/memory/file_history", get(memory::get_file_history))
         .route("/tools/exec", post(tools_exec))
@@ -793,6 +794,75 @@ async fn memory_search_hybrid(
         "query": req.query,
         "count": items.len(),
         "results": items,
+    })))
+}
+
+
+// ── Memory Write (Phase 2 — Memory Bridge) ────────────────────────────────────
+
+#[derive(Deserialize)]
+struct MemoryWriteRequest {
+    title: String,
+    content: String,
+    #[serde(default = "default_bucket")]
+    bucket: String,
+    #[serde(default = "default_namespace")]
+    namespace: String,
+    #[serde(default = "default_memory_type")]
+    memory_type: String,
+    #[serde(default = "default_importance")]
+    importance: i32,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    source: Option<String>,
+}
+
+fn default_bucket() -> String { "personal".to_string() }
+fn default_memory_type() -> String { "note".to_string() }
+fn default_importance() -> i32 { 5 }
+
+async fn memory_write(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<MemoryWriteRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some((_user_id, _email, _role)) = extract_user(&headers, &state.config.jwt_secret) else {
+        return Err((StatusCode::UNAUTHORIZED, Json(json!({"error": "Unauthorized"}))));
+    };
+
+    if req.title.trim().is_empty() || req.content.trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({"error": "title and content are required"}))));
+    }
+
+    let source = req.source.unwrap_or_else(|| "admin_frank".to_string());
+
+    let id = memory::store(
+        &state.db,
+        &req.bucket,
+        &req.namespace,
+        &req.memory_type,
+        &req.title,
+        &req.content,
+        req.importance,
+        &req.tags,
+        None,
+        None,
+        None,
+        &source,
+    )
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+
+    Ok(Json(json!({
+        "id": id.to_string(),
+        "title": req.title,
+        "bucket": req.bucket,
+        "namespace": req.namespace,
+        "memory_type": req.memory_type,
+        "importance": req.importance,
+        "source": source,
+        "status": "written",
     })))
 }
 
