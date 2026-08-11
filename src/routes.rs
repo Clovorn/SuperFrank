@@ -33,6 +33,9 @@ pub fn api_router() -> Router<AppState> {
         .route("/memory/search_semantic", post(memory_search_semantic))
         .route("/memory/search_hybrid", post(memory_search_hybrid))
         .route("/memory/write", post(memory_write))
+        .route("/memory/update", post(memory_update))
+        .route("/memory/retire", post(memory_retire))
+        .route("/memory/recall", get(memory_recall))
         .route("/api/v1/memory/build_history", get(memory::get_build_history))
         .route("/api/v1/memory/file_history", get(memory::get_file_history))
         .route("/tools/exec", post(tools_exec))
@@ -703,6 +706,8 @@ struct SemanticSearchRequest {
     threshold: Option<f32>,
     #[serde(default = "default_namespace")]
     namespace: String,
+    #[serde(default)]
+    bucket: Option<String>,
 }
 
 fn default_limit() -> i32 { 10 }
@@ -729,6 +734,7 @@ async fn memory_search_semantic(
         &api_key,
         req.limit,
         req.threshold,
+        req.bucket.as_deref(),
     )
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
@@ -773,6 +779,7 @@ async fn memory_search_hybrid(
         &req.namespace,
         &api_key,
         req.limit,
+        req.bucket.as_deref(),
     )
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
@@ -1329,4 +1336,186 @@ async fn agent_spawn_endpoint(
             "goal": goal
         })))
     }
+}
+
+// ── Memory Update (Phase 3 — Memory Enhancements) ─────────────────────────────
+
+#[derive(Deserialize)]
+struct MemoryUpdateRequest {
+    id: String,
+    content: Option<String>,
+    importance: Option<i32>,
+    tags: Option<Vec<String>>,
+}
+
+async fn memory_update(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<MemoryUpdateRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some((_user_id, _email, _role)) = extract_user(&headers, &state.config.jwt_secret) else {
+        return Err((StatusCode::UNAUTHORIZED, Json(json!({"error": "Unauthorized"}))));
+    };
+
+    let memory_id = Uuid::parse_str(&req.id)
+        .map_err(|_| (StatusCode::BAD_REQUEST, Json(json!({"error": "Invalid UUID"}))))?;
+
+    // Build dynamic update query
+    let mut updates = Vec::new();
+    
+    if req.content.is_some() {
+        updates.push("content");
+    }
+    if req.importance.is_some() {
+        updates.push("importance");
+    }
+    if req.tags.is_some() {
+        updates.push("tags");
+    }
+
+    if updates.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({"error": "No fields to update"}))));
+    }
+
+    // Execute update
+    let mut param_idx = 2;
+    let mut set_clauses = Vec::new();
+    
+    if let Some(ref content) = req.content {
+        set_clauses.push(format!("content = ${}", param_idx));
+        param_idx += 1;
+    }
+    if let Some(importance) = req.importance {
+        set_clauses.push(format!("importance = ${}", param_idx));
+        param_idx += 1;
+    }
+    if let Some(ref tags) = req.tags {
+        set_clauses.push(format!("tags = ${}", param_idx));
+        param_idx += 1;
+    }
+
+    let sql = format!(
+        "UPDATE frankos_memory SET {}, updated_at = NOW() WHERE id = $1 RETURNING title",
+        set_clauses.join(", ")
+    );
+
+    let mut query = sqlx::query_scalar::<_, String>(&sql).bind(memory_id);
+    
+    if let Some(content) = &req.content {
+        query = query.bind(content);
+    }
+    if let Some(importance) = req.importance {
+        query = query.bind(importance);
+    }
+    if let Some(tags) = &req.tags {
+        query = query.bind(tags);
+    }
+
+    let title = query
+        .fetch_one(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+
+    // Re-generate embedding if content was updated
+    if let Some(content) = req.content {
+        let db_clone = state.db.clone();
+        let id_str = req.id.clone();
+        let title_clone = title.clone();
+        tokio::spawn(async move {
+            if let Ok(api_key) = std::env::var("OPENAI_API_KEY") {
+                let text = format!("{}\n{}", title_clone, content);
+                if let Err(e) = crate::semantic_search::update_memory_embedding(&db_clone, &id_str, &text, &api_key).await {
+                    eprintln!("Failed to re-generate embedding for memory {}: {}", id_str, e);
+                }
+            }
+        });
+    }
+
+    Ok(Json(json!({
+        "success": true,
+        "id": req.id,
+    })))
+}
+
+// ── Memory Retire (Phase 3 — Memory Enhancements) ─────────────────────────────
+
+#[derive(Deserialize)]
+struct MemoryRetireRequest {
+    id: String,
+    reason: Option<String>,
+}
+
+async fn memory_retire(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<MemoryRetireRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some((_user_id, _email, _role)) = extract_user(&headers, &state.config.jwt_secret) else {
+        return Err((StatusCode::UNAUTHORIZED, Json(json!({"error": "Unauthorized"}))));
+    };
+
+    let memory_id = Uuid::parse_str(&req.id)
+        .map_err(|_| (StatusCode::BAD_REQUEST, Json(json!({"error": "Invalid UUID"}))))?;
+
+    sqlx::query(
+        "UPDATE frankos_memory SET is_active = false, updated_at = NOW() WHERE id = $1"
+    )
+    .bind(memory_id)
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+
+    // Optionally log retirement reason to system events
+    if let Some(reason) = req.reason {
+        crate::system_events::emit_event(
+            &state.db,
+            crate::system_events::event_type::MEMORY_WRITE,
+            crate::system_events::severity::INFO,
+            serde_json::json!({
+                "action": "retire",
+                "memory_id": req.id,
+                "reason": reason,
+            }),
+        ).await;
+    }
+
+    Ok(Json(json!({
+        "success": true,
+        "id": req.id,
+    })))
+}
+
+// ── Memory Recall (Phase 3 — Memory Enhancements) ─────────────────────────────
+
+async fn memory_recall(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some((_user_id, _email, _role)) = extract_user(&headers, &state.config.jwt_secret) else {
+        return Err((StatusCode::UNAUTHORIZED, Json(json!({"error": "Unauthorized"}))));
+    };
+
+    let recall_ctx = memory::recall(&state.db, "chuck_frank", None, 5)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+
+    let to_json = |entries: &[memory::MemoryEntry]| -> Vec<Value> {
+        entries.iter().map(|e| json!({
+            "id": e.id.to_string(),
+            "title": e.title,
+            "content": e.content,
+            "bucket": e.bucket,
+            "memory_type": e.memory_type,
+            "importance": e.importance,
+            "tags": e.tags,
+        })).collect()
+    };
+
+    Ok(Json(json!({
+        "telos": to_json(&recall_ctx.telos),
+        "character": to_json(&recall_ctx.character),
+        "work": to_json(&recall_ctx.work),
+        "project": to_json(&recall_ctx.project),
+        "build_state": to_json(&recall_ctx.build_state),
+    })))
 }

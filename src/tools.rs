@@ -899,6 +899,7 @@ async fn exec_memory_search_semantic(input: &Value, ctx: &ToolContext) -> Result
         openai_key,
         limit,
         threshold,
+        None,
     ).await?;
 
     let memories: Vec<Value> = results.iter()

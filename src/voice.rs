@@ -56,7 +56,7 @@ async fn create_voice_session(
     // Request ephemeral session token from OpenAI
     let client = reqwest::Client::new();
     let resp = client
-        .post("https://api.openai.com/v1/realtime/sessions")
+        .post("https://api.openai.com/v1/realtime/client_secrets")
         .header("OpenAI-Beta", "realtime=v1")
         .header("Authorization", format!("Bearer {}", openai_key))
         .header("Content-Type", "application/json")
@@ -70,9 +70,6 @@ async fn create_voice_session(
                 "threshold": 0.5,
                 "prefix_padding_ms": 300,
                 "silence_duration_ms": 600
-            },
-            "input_audio_transcription": {
-                "model": "whisper-1"
             }
         }))
         .send().await

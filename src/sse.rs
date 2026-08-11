@@ -240,6 +240,7 @@ async fn stream_message(
             openai_key,
             5,
             Some(0.4),
+            None,
         ).await {
             Ok(results) if !results.is_empty() => {
                 let mut parts = vec!["## Blueprint Context (retrieved from memory)".to_string()];

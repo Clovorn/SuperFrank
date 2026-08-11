@@ -401,6 +401,7 @@ async fn recall_prior_work(db: &PgPool, task: &TaskRecord) -> String {
                 &api_key,
                 5,
                 Some(0.35),
+                None,
             ).await {
                 Ok(results) => {
                     if results.is_empty() {

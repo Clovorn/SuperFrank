@@ -27,6 +27,7 @@ pub async fn semantic_search(
     api_key: &str,
     limit: i32,
     similarity_threshold: Option<f32>,
+    bucket_filter: Option<&str>,
 ) -> Result<Vec<SemanticSearchResult>> {
     // Generate embedding for the query
     let query_embedding = generate_embedding(query, api_key)
@@ -44,35 +45,72 @@ pub async fn semantic_search(
     // Perform vector similarity search using cosine distance
     // pgvector: <=> is cosine distance, <#> is negative inner product, <-> is L2 distance
     // We use 1 - cosine_distance to get similarity score (higher = more similar)
-    let results = sqlx::query_as::<_, SemanticSearchResult>(
-        r#"
-        SELECT 
-            id::text as id,
-            title,
-            content,
-            memory_type,
-            namespace,
-            bucket,
-            importance,
-            tags,
-            created_at,
-            updated_at,
-            (1 - (embedding <=> $1::text::vector(1536)))::float4 as similarity
-        FROM frankos_memory
-        WHERE namespace = $2
-            AND embedding IS NOT NULL
-            AND (1 - (embedding <=> $1::text::vector(1536))) >= $3
-        ORDER BY embedding <=> $1::text::vector(1536)
-        LIMIT $4
-        "#,
-    )
-    .bind(&embedding_str)
-    .bind(namespace)
-    .bind(threshold)
-    .bind(limit)
-    .fetch_all(pool)
-    .await
-    .context("Failed to execute semantic search query")?;
+    // Apply importance weighting: adjusted_score = similarity * (0.7 + 0.3 * importance/10.0)
+    let results = if let Some(bucket) = bucket_filter {
+        sqlx::query_as::<_, SemanticSearchResult>(
+            r#"
+            SELECT 
+                id::text as id,
+                title,
+                content,
+                memory_type,
+                namespace,
+                bucket,
+                importance,
+                tags,
+                created_at,
+                updated_at,
+                ((1 - (embedding <=> $1::text::vector(1536))) * (0.7 + 0.3 * (importance::float / 10.0)))::float4 as similarity
+            FROM frankos_memory
+            WHERE namespace = $2
+                AND bucket = $5
+                AND embedding IS NOT NULL
+                AND is_active = true
+                AND (1 - (embedding <=> $1::text::vector(1536))) >= $3
+            ORDER BY ((1 - (embedding <=> $1::text::vector(1536))) * (0.7 + 0.3 * (importance::float / 10.0))) DESC
+            LIMIT $4
+            "#,
+        )
+        .bind(&embedding_str)
+        .bind(namespace)
+        .bind(threshold)
+        .bind(limit)
+        .bind(bucket)
+        .fetch_all(pool)
+        .await
+        .context("Failed to execute semantic search query")?
+    } else {
+        sqlx::query_as::<_, SemanticSearchResult>(
+            r#"
+            SELECT 
+                id::text as id,
+                title,
+                content,
+                memory_type,
+                namespace,
+                bucket,
+                importance,
+                tags,
+                created_at,
+                updated_at,
+                ((1 - (embedding <=> $1::text::vector(1536))) * (0.7 + 0.3 * (importance::float / 10.0)))::float4 as similarity
+            FROM frankos_memory
+            WHERE namespace = $2
+                AND embedding IS NOT NULL
+                AND is_active = true
+                AND (1 - (embedding <=> $1::text::vector(1536))) >= $3
+            ORDER BY ((1 - (embedding <=> $1::text::vector(1536))) * (0.7 + 0.3 * (importance::float / 10.0))) DESC
+            LIMIT $4
+            "#,
+        )
+        .bind(&embedding_str)
+        .bind(namespace)
+        .bind(threshold)
+        .bind(limit)
+        .fetch_all(pool)
+        .await
+        .context("Failed to execute semantic search query")?
+    };
 
     Ok(results)
 }
@@ -84,6 +122,7 @@ pub async fn hybrid_search(
     namespace: &str,
     api_key: &str,
     limit: i32,
+    bucket_filter: Option<&str>,
 ) -> Result<Vec<SemanticSearchResult>> {
     // Generate embedding for semantic search
     let query_embedding = generate_embedding(query, api_key)
@@ -97,61 +136,125 @@ pub async fn hybrid_search(
 
     // Hybrid search: combine semantic similarity with keyword matching
     // Score = 0.7 * semantic_similarity + 0.3 * keyword_match
-    let results = sqlx::query_as::<_, SemanticSearchResult>(
-        r#"
-        WITH semantic AS (
+    // Then apply importance weighting: final_score = hybrid_score * (0.7 + 0.3 * importance/10.0)
+    let results = if let Some(bucket) = bucket_filter {
+        sqlx::query_as::<_, SemanticSearchResult>(
+            r#"
+            WITH semantic AS (
+                SELECT 
+                    id,
+                    title,
+                    content,
+                    memory_type,
+                    namespace,
+                    bucket,
+                    importance,
+                    tags,
+                    created_at,
+                    updated_at,
+                    1 - (embedding <=> $1::text::vector(1536)) as semantic_score
+                FROM frankos_memory
+                WHERE namespace = $2
+                    AND bucket = $5
+                    AND embedding IS NOT NULL
+                    AND is_active = true
+            ),
+            keyword AS (
+                SELECT 
+                    id,
+                    CASE 
+                        WHEN title ILIKE '%' || $3 || '%' OR content ILIKE '%' || $3 || '%' THEN 1.0
+                        ELSE 0.0
+                    END as keyword_score
+                FROM frankos_memory
+                WHERE namespace = $2
+                    AND bucket = $5
+            )
             SELECT 
-                id,
-                title,
-                content,
-                memory_type,
-                namespace,
-                bucket,
-                importance,
-                tags,
-                created_at,
-                updated_at,
-                1 - (embedding <=> $1::text::vector(1536)) as semantic_score
-            FROM frankos_memory
-            WHERE namespace = $2
-                AND embedding IS NOT NULL
-        ),
-        keyword AS (
-            SELECT 
-                id,
-                CASE 
-                    WHEN title ILIKE '%' || $3 || '%' OR content ILIKE '%' || $3 || '%' THEN 1.0
-                    ELSE 0.0
-                END as keyword_score
-            FROM frankos_memory
-            WHERE namespace = $2
+                s.id::text as id,
+                s.title,
+                s.content,
+                s.memory_type,
+                s.namespace,
+                s.bucket,
+                s.importance,
+                s.tags,
+                s.created_at,
+                s.updated_at,
+                ((0.7 * s.semantic_score + 0.3 * COALESCE(k.keyword_score, 0.0)) * (0.7 + 0.3 * (s.importance::float / 10.0)))::float4 as similarity
+            FROM semantic s
+            LEFT JOIN keyword k ON s.id = k.id
+            WHERE (0.7 * s.semantic_score + 0.3 * COALESCE(k.keyword_score, 0.0)) >= 0.3
+            ORDER BY similarity DESC
+            LIMIT $4
+            "#,
         )
-        SELECT 
-            s.id,
-            s.title,
-            s.content,
-            s.memory_type,
-            s.namespace,
-            s.bucket,
-            s.importance,
-            s.tags,
-            s.created_at,
-            s.updated_at,
-            (0.7 * s.semantic_score + 0.3 * COALESCE(k.keyword_score, 0.0)) as similarity
-        FROM semantic s
-        LEFT JOIN keyword k ON s.id = k.id
-        WHERE (0.7 * s.semantic_score + 0.3 * COALESCE(k.keyword_score, 0.0)) >= 0.3
-        ORDER BY similarity DESC
-        LIMIT $4
-        "#,
-    )
-    .bind(&embedding_str)
-    .bind(namespace)
-    .bind(query)
-    .bind(limit)
-    .fetch_all(pool)
-    .await
-    .context("Failed to execute hybrid search query")?;
+        .bind(&embedding_str)
+        .bind(namespace)
+        .bind(query)
+        .bind(limit)
+        .bind(bucket)
+        .fetch_all(pool)
+        .await
+        .context("Failed to execute hybrid search query")?
+    } else {
+        sqlx::query_as::<_, SemanticSearchResult>(
+            r#"
+            WITH semantic AS (
+                SELECT 
+                    id,
+                    title,
+                    content,
+                    memory_type,
+                    namespace,
+                    bucket,
+                    importance,
+                    tags,
+                    created_at,
+                    updated_at,
+                    1 - (embedding <=> $1::text::vector(1536)) as semantic_score
+                FROM frankos_memory
+                WHERE namespace = $2
+                    AND embedding IS NOT NULL
+                    AND is_active = true
+            ),
+            keyword AS (
+                SELECT 
+                    id,
+                    CASE 
+                        WHEN title ILIKE '%' || $3 || '%' OR content ILIKE '%' || $3 || '%' THEN 1.0
+                        ELSE 0.0
+                    END as keyword_score
+                FROM frankos_memory
+                WHERE namespace = $2
+            )
+            SELECT 
+                s.id::text as id,
+                s.title,
+                s.content,
+                s.memory_type,
+                s.namespace,
+                s.bucket,
+                s.importance,
+                s.tags,
+                s.created_at,
+                s.updated_at,
+                ((0.7 * s.semantic_score + 0.3 * COALESCE(k.keyword_score, 0.0)) * (0.7 + 0.3 * (s.importance::float / 10.0)))::float4 as similarity
+            FROM semantic s
+            LEFT JOIN keyword k ON s.id = k.id
+            WHERE (0.7 * s.semantic_score + 0.3 * COALESCE(k.keyword_score, 0.0)) >= 0.3
+            ORDER BY similarity DESC
+            LIMIT $4
+            "#,
+        )
+        .bind(&embedding_str)
+        .bind(namespace)
+        .bind(query)
+        .bind(limit)
+        .fetch_all(pool)
+        .await
+        .context("Failed to execute hybrid search query")?
+    };
 
     Ok(results)
 }
