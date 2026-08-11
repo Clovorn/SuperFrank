@@ -82,37 +82,6 @@ pub fn new_shared_status() -> SharedEngineerStatus {
     Arc::new(RwLock::new(EngineerStatus::default()))
 }
 
-/// Write a decision to engineer_decisions memory bucket
-async fn write_decision(
-    db: &PgPool,
-    user_id: Uuid,
-    title: String,
-    content: String,
-    tags: Vec<String>,
-    importance: i32,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut final_tags = tags;
-    final_tags.push("engineer_decision".to_string());
-    
-    crate::memory::store(
-        db,
-        "engineer_decisions",
-        "engineer_context",
-        "decision",
-        &title,
-        &content,
-        importance,
-        &final_tags,
-        None,
-        None,
-        None,
-        "engineer_write_decision",
-    ).await?;
-    
-    tracing::info!("Wrote engineer decision: {}", title);
-    Ok(())
-}
-
 /// Main Engineer resident loop — run as a tokio::spawn'd task at gateway boot.
 /// Never returns unless the process exits.
 pub async fn run(db: PgPool, llm: Arc<crate::llm::LlmClient>, brave_key: Option<String>, status: SharedEngineerStatus) {
@@ -190,12 +159,8 @@ pub async fn run(db: PgPool, llm: Arc<crate::llm::LlmClient>, brave_key: Option<
                     if let Ok(true) = claim_task(&db, task.task_id, engineer_pid).await {
                         // Track task start time for heartbeat (P8E)
                         task_starts.lock().await.insert(task.task_id, std::time::Instant::now());
-                        
-                        // Recall relevant prior work from memory
-                        let recall_context = recall_prior_work(&db, &task).await;
-                        
                         // Spawn an agent to execute it
-                        match spawn_task_agent(&db, &task, engineer_pid, brave_key.clone(), recall_context).await {
+                        match spawn_task_agent(&db, &task, engineer_pid, brave_key.clone()).await {
                             Ok(agent_id) => {
                                 info!("Engineer: spawned agent {} for task '{}'", agent_id, task.title);
 
@@ -215,9 +180,8 @@ pub async fn run(db: PgPool, llm: Arc<crate::llm::LlmClient>, brave_key: Option<
                                 let status2 = status.clone();
                                 let task_title = task.title.clone();
                                 let task_id = task.task_id;
-                                let task_starts2 = task_starts.clone();
                                 tokio::spawn(async move {
-                                    monitor_agent_completion(db2, agent_id, task_id, &task_title, status2, task_starts2).await;
+                                    monitor_agent_completion(db2, agent_id, task_id, &task_title, status2).await;
                                 });
                             }
                             Err(e) => {
@@ -382,63 +346,12 @@ async fn release_task_to_pending(db: &PgPool, task_id: Uuid) -> Result<()> {
     Ok(())
 }
 
-/// Recall relevant prior work from memory for a task
-async fn recall_prior_work(db: &PgPool, task: &TaskRecord) -> String {
-    // Extract gap_label from title if present (e.g., "Gap 9 · P1B · ...")
-    let gap_label = task.title.split('·')
-        .next()
-        .map(|s| s.trim())
-        .unwrap_or("");
-    
-    let search_query = format!("{} {}", task.title, gap_label);
-    
-    match std::env::var("OPENAI_API_KEY") {
-        Ok(api_key) => {
-            match crate::semantic_search::semantic_search(
-                db,
-                &search_query,
-                "chuck_frank",
-                &api_key,
-                5,
-                Some(0.35),
-            ).await {
-                Ok(results) => {
-                    if results.is_empty() {
-                        info!("Memory recall for task {}: no relevant prior work found", task.task_id);
-                        "No relevant prior work found.".to_string()
-                    } else {
-                        let mut context = String::from("## Relevant Prior Work\n\n");
-                        for result in &results {
-                            context.push_str(&format!("**{}** (similarity: {:.2})\n{}\n\n",
-                                result.title,
-                                result.similarity,
-                                result.content
-                            ));
-                        }
-                        info!("Memory recall for task {}: {} results", task.task_id, results.len());
-                        context
-                    }
-                }
-                Err(e) => {
-                    warn!("Memory recall failed for task {}: {}", task.task_id, e);
-                    "Memory recall unavailable.".to_string()
-                }
-            }
-        }
-        Err(_) => {
-            warn!("Memory recall skipped for task {}: OpenAI API key not configured", task.task_id);
-            "Memory recall unavailable.".to_string()
-        }
-    }
-}
-
 /// Spawn a frankos_agent to execute a task, linked to Engineer's persistent_agent_id
 async fn spawn_task_agent(
     db: &PgPool,
     task: &TaskRecord,
     engineer_pid: Uuid,
     _brave_key: Option<String>,
-    recall_context: String,
 ) -> Result<Uuid> {
     // Build the goal prompt from task details
     let mut goal = format!(
@@ -453,10 +366,6 @@ async fn spawn_task_agent(
     if let Some(ctx) = &task.context {
         goal.push_str(&format!("Context: {}\n\n", serde_json::to_string_pretty(ctx).unwrap_or_default()));
     }
-    
-    // Append memory recall context
-    goal.push_str(&format!("\n{}\n", recall_context));
-
 
     goal.push_str(
         "Use your available tools to complete this task. \
@@ -496,7 +405,6 @@ async fn monitor_agent_completion(
     task_id: Uuid,
     task_title: &str,
     status: SharedEngineerStatus,
-    task_starts: Arc<tokio::sync::Mutex<std::collections::HashMap<uuid::Uuid, std::time::Instant>>>,
 ) {
     let deadline = Instant::now() + Duration::from_secs(AGENT_TIMEOUT_SECS);
 
@@ -810,20 +718,6 @@ Step 13: task_done — outcome field MUST contain the actual curl/psql/ls output
 - Escalate: task_block + notify_internal level=warn
 - Store finding: memory_write bucket=build_state
 - Research patterns/docs: web_search or web_fetch
-
-## Decision Tracking Tool
-
-When you make a significant architectural or implementation decision, document it using:
-
-write_decision(title, content, tags, importance)
-
-Example:
-- title: \"Retry Logic — Exponential Backoff Strategy\"
-- content: \"Decision: Use exponential backoff with base 10s. Rationale: Transient failures resolve quickly, exponential prevents hammering. Alternatives: fixed delay (too slow), linear (doesn't back off fast enough).\"
-- tags: [\"retry\", \"backoff\", \"transient-failures\"]
-- importance: 7
-
-This creates a queryable record for future reference.
 
 ## Key Paths
 - Source: /opt/frankos/runtime/frankos-gateway/src/

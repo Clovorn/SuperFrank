@@ -94,6 +94,82 @@ pub async fn exec_task_done(input: &Value, db: &PgPool) -> Result<Value> {
     .execute(db)
     .await?;
 
+    // Write task completion to build_history memory (non-blocking)
+    let task_row = sqlx::query!(
+        "SELECT title, description, context FROM frank_tasks WHERE task_id = $1",
+        task_id
+    )
+    .fetch_optional(db)
+    .await;
+
+    if let Ok(Some(row)) = task_row {
+        // Validate and enrich build history entry
+        let mut memory_tags = vec!["engineer_task".to_string(), "build_history".to_string()];
+
+        // Extract gap label from title (format: "Gap X · PYZ — Title")
+        let gap_label = if let Some(idx) = row.title.find(" — ") {
+            row.title[..idx].to_string()
+        } else if let Some(idx) = row.title.find(':') {
+            row.title[..idx].trim().to_string()
+        } else {
+            "Unknown".to_string()
+        };
+
+        // Auto-extract gap tag from gap_label
+        if gap_label != "Unknown" {
+            // Extract gap number: "Gap 8 · P8A" -> "gap8"
+            let gap_tag = gap_label
+                .split("·")
+                .next()
+                .unwrap_or(&gap_label)
+                .trim()
+                .to_lowercase()
+                .replace(" ", "");
+            memory_tags.push(gap_tag);
+        }
+
+        // Validate that outcome is not empty (this is our verification evidence)
+        if outcome.trim().is_empty() {
+            tracing::warn!("Task {} completed with empty outcome — memory entry will lack verification", task_id);
+        }
+
+        let memory_title = format!("{} — {}", gap_label, row.title);
+        
+        // Extract files_touched from context if present
+        let files_touched = row.context
+            .as_ref()
+            .and_then(|ctx| ctx.get("files_touched"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("None specified");
+
+        let memory_content = format!(
+            "**Task ID:** {}\n\n**Files Modified:**\n{}\n\n**Verification Outcome:**\n```\n{}\n```\n\n**Description:**\n{}\n",
+            task_id_str,
+            files_touched,
+            outcome,
+            row.description.as_deref().unwrap_or("No description provided")
+        );
+
+        if let Err(e) = crate::memory::store(
+            db,
+            "build_history",
+            "chuck_frank",
+            "concept",
+            &memory_title,
+            &memory_content,
+            6,
+            &memory_tags,
+            None,
+            None,
+            None,
+            "engineer_task_done",
+        ).await {
+            tracing::warn!("Failed to write build history memory entry: {}", e);
+        } else {
+            info!("Wrote build history memory entry: {} (tags: {:?})", memory_title, memory_tags);
+        }
+    }
+
     info!("Task completed: {} — {}", task_id, outcome);
     Ok(json!({
         "success": true,

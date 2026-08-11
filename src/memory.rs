@@ -1,6 +1,9 @@
 //! Memory system — scoped recall pipeline
 
 use anyhow::Result;
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::response::Json;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -230,3 +233,121 @@ fn rows_to_entries(rows: Vec<sqlx::postgres::PgRow>) -> Vec<MemoryEntry> {
         })
     }).collect()
 }
+
+// ── Build History Query Endpoint ──────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+pub struct BuildHistoryQuery {
+    gap: Option<String>,
+    limit: Option<i64>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct FileHistoryQuery {
+    path: String,
+    limit: Option<i64>,
+}
+
+pub async fn get_build_history(
+    State(state): State<crate::AppState>,
+    axum::extract::Query(params): axum::extract::Query<BuildHistoryQuery>,
+) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
+    let limit = params.limit.unwrap_or(10).min(50);
+    
+    let json_results = if let Some(gap_label) = params.gap {
+        let gap_tag = gap_label.to_lowercase().replace(" ", "").replace("·", "");
+        let rows = sqlx::query!(
+            r#"
+            SELECT title, content, tags, created_at, importance
+            FROM frankos_memory
+            WHERE bucket = 'build_history'
+              AND tags @> ARRAY[$1]::text[]
+            ORDER BY created_at DESC
+            LIMIT $2
+            "#,
+            gap_tag,
+            limit
+        )
+        .fetch_all(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        
+        rows.into_iter().map(|row| {
+            serde_json::json!({
+                "title": row.title,
+                "content": row.content,
+                "tags": row.tags,
+                "created_at": row.created_at,
+                "importance": row.importance
+            })
+        }).collect()
+    } else {
+        let rows = sqlx::query!(
+            r#"
+            SELECT title, content, tags, created_at, importance
+            FROM frankos_memory
+            WHERE bucket = 'build_history'
+            ORDER BY created_at DESC
+            LIMIT $1
+            "#,
+            limit
+        )
+        .fetch_all(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        
+        rows.into_iter().map(|row| {
+            serde_json::json!({
+                "title": row.title,
+                "content": row.content,
+                "tags": row.tags,
+                "created_at": row.created_at,
+                "importance": row.importance
+            })
+        }).collect()
+    };
+    
+    Ok(Json(json_results))
+}
+
+pub async fn get_file_history(
+    State(state): State<crate::AppState>,
+    axum::extract::Query(params): axum::extract::Query<FileHistoryQuery>,
+) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
+    let limit = params.limit.unwrap_or(10).min(50);
+    
+    // Search for file path in content field using LIKE
+    let search_pattern = format!("%{}%", params.path);
+    
+    let results = sqlx::query!(
+        r#"
+        SELECT title, content, tags, created_at, importance
+        FROM frankos_memory
+        WHERE bucket = 'build_history'
+          AND content LIKE $1
+        ORDER BY created_at DESC
+        LIMIT $2
+        "#,
+        search_pattern,
+        limit
+    )
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    
+    let json_results: Vec<serde_json::Value> = results
+        .into_iter()
+        .map(|row| {
+            serde_json::json!({
+                "title": row.title,
+                "content": row.content,
+                "tags": row.tags,
+                "created_at": row.created_at,
+                "importance": row.importance
+            })
+        })
+        .collect();
+    
+    Ok(Json(json_results))
+}
+

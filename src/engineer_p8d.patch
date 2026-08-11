@@ -1,0 +1,197 @@
+
+// PATCH: Add retry logic to monitor_agent_completion function
+// Location: src/engineer.rs - replace monitor_agent_completion implementation
+
+/// Monitor a spawned agent until it completes or times out, then update task status
+/// WITH RETRY LOGIC: up to 3 retries on transient failures with exponential backoff
+async fn monitor_agent_completion(
+    db: PgPool,
+    agent_id: Uuid,
+    task_id: Uuid,
+    task_title: &str,
+    status: SharedEngineerStatus,
+) {
+    let deadline = Instant::now() + Duration::from_secs(AGENT_TIMEOUT_SECS);
+
+    loop {
+        if Instant::now() > deadline {
+            warn!(\"Engineer: agent {} timed out for task '{}'\", agent_id, task_title);
+
+            // Mark task blocked
+            let msg = format!(\"Agent {} timed out after {}s\", agent_id, AGENT_TIMEOUT_SECS);
+            let _ = mark_task_blocked(&db, task_id, &msg).await;
+            let _ = write_frank_to_mac(&msg, task_id).await;
+
+            // Update counters
+            {
+                let mut s = status.write().await;
+                s.tasks_blocked_this_session += 1;
+                s.active_agents.retain(|a| a.agent_id != agent_id);
+            }
+            return;
+        }
+
+        sleep(Duration::from_secs(10)).await;
+
+        // Check agent status
+        match get_agent_status(&db, agent_id).await {
+            Ok(agent_status) => {
+                match agent_status.as_str() {
+                    \"complete\" => {
+                        info!(\"Engineer: agent {} completed task '{}'\", agent_id, task_title);
+
+                        // The agent should have called task_done already.
+                        // If not, force-complete it here.
+                        let task_status = get_task_status(&db, task_id).await.unwrap_or_default();
+                        if task_status != \"COMPLETE\" && task_status != \"BLOCKED\" {
+                            info!(\"Engineer: agent completed but task still {}; forcing COMPLETE\", task_status);
+                            let _ = mark_task_complete(&db, task_id, \"Agent completed (auto-close)\").await;
+                        }
+
+                        {
+                            let mut s = status.write().await;
+                            s.tasks_completed_this_session += 1;
+                            s.active_agents.retain(|a| a.agent_id != agent_id);
+                            s.current_task_id = None;
+                            s.current_task_title = None;
+                        }
+                        return;
+                    }
+                    \"failed\" => {
+                        warn!(\"Engineer: agent {} failed for task '{}'\", agent_id, task_title);
+
+                        // ═══ RETRY LOGIC (P8D) ═══
+                        // Read current retry count
+                        match get_task_retry_count(&db, task_id).await {
+                            Ok(retry_count) => {
+                                if retry_count < 3 {
+                                    // Not at max retries — reset and retry
+                                    let new_retry_count = retry_count + 1;
+                                    let backoff_secs = 30 * 2u64.pow(retry_count as u32);
+                                    
+                                    info!(\"Engineer: task '{}' failure #{} — retrying after {}s backoff\", 
+                                        task_title, new_retry_count, backoff_secs);
+
+                                    // 1. Increment retry_count and reset status to PENDING
+                                    if let Err(e) = increment_and_reset_task(&db, task_id, new_retry_count).await {
+                                        warn!(\"Engineer: failed to reset task for retry: {}\", e);
+                                        let _ = mark_task_blocked(&db, task_id, &format!(\"Failed to reset for retry: {}\", e)).await;
+                                        let _ = write_frank_to_mac(&format!(\"Failed to reset task for retry: {}\", e), task_id).await;
+                                        {
+                                            let mut s = status.write().await;
+                                            s.tasks_blocked_this_session += 1;
+                                            s.active_agents.retain(|a| a.agent_id != agent_id);
+                                        }
+                                        return;
+                                    }
+
+                                    // 2. Emit retry event with reason
+                                    let error_msg = get_agent_error(&db, agent_id).await
+                                        .unwrap_or_else(|_| \"Unknown agent error\".to_string());
+                                    let _ = emit_task_event(&db, task_id, \"retry\", json!({
+                                        \"attempt\": new_retry_count,
+                                        \"reason\": error_msg,
+                                        \"backoff_seconds\": backoff_secs,
+                                    })).await;
+
+                                    // 3. Sleep with exponential backoff (30s, 60s, 120s for attempts 1,2,3)
+                                    info!(\"Engineer: backing off for {}s before retry attempt {}\", backoff_secs, new_retry_count);
+                                    sleep(Duration::from_secs(backoff_secs)).await;
+
+                                    // Task is now PENDING again — Engineer will pick it up on next poll
+                                    // Exit this agent monitor — the task will be re-spawned
+                                    {
+                                        let mut s = status.write().await;
+                                        s.active_agents.retain(|a| a.agent_id != agent_id);
+                                    }
+                                    return;
+                                } else {
+                                    // Max retries reached — block the task
+                                    let reason = get_agent_error(&db, agent_id).await
+                                        .unwrap_or_else(|_| \"Unknown agent error\".to_string());
+                                    let final_msg = format!(\"Task failed after 3 retry attempts. Final error: {}\", reason);
+                                    let _ = mark_task_blocked(&db, task_id, &final_msg).await;
+                                    let _ = write_frank_to_mac(&final_msg, task_id).await;
+                                    
+                                    // Emit final failure event
+                                    let _ = emit_task_event(&db, task_id, \"blocked\", json!({
+                                        \"reason\": \"Max retries exceeded\",
+                                        \"attempts\": 3,
+                                    })).await;
+
+                                    {
+                                        let mut s = status.write().await;
+                                        s.tasks_blocked_this_session += 1;
+                                        s.active_agents.retain(|a| a.agent_id != agent_id);
+                                    }
+                                    return;
+                                }
+                            }
+                            Err(e) => {
+                                warn!(\"Engineer: failed to read retry count for task '{}': {}\", task_title, e);
+                                let reason = get_agent_error(&db, agent_id).await
+                                    .unwrap_or_else(|_| \"Unknown agent error\".to_string());
+                                let _ = mark_task_blocked(&db, task_id, &reason).await;
+                                let _ = write_frank_to_mac(&reason, task_id).await;
+
+                                {
+                                    let mut s = status.write().await;
+                                    s.tasks_blocked_this_session += 1;
+                                    s.active_agents.retain(|a| a.agent_id != agent_id);
+                                }
+                                return;
+                            }
+                        }
+                    }
+                    _ => {
+                        // Still running — keep waiting
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(\"Engineer: error checking agent status: {}\", e);
+            }
+        }
+    }
+}
+
+// ═══ NEW HELPER FUNCTIONS FOR RETRY LOGIC ═══
+
+async fn get_task_retry_count(db: &PgPool, task_id: Uuid) -> Result<u32> {
+    let count: i32 = sqlx::query_scalar(
+        \"SELECT COALESCE(retry_count, 0) FROM frank_tasks WHERE task_id = $1\"
+    )
+    .bind(task_id)
+    .fetch_one(db)
+    .await?;
+    Ok(count as u32)
+}
+
+async fn increment_and_reset_task(db: &PgPool, task_id: Uuid, new_retry_count: u32) -> Result<()> {
+    sqlx::query(
+        r#\"UPDATE frank_tasks
+           SET retry_count = $2,
+               status = 'PENDING',
+               started_at = NULL,
+               updated_at = NOW()
+           WHERE task_id = $1\"#
+    )
+    .bind(task_id)
+    .bind(new_retry_count as i32)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+async fn emit_task_event(db: &PgPool, task_id: Uuid, event_type: &str, data: Value) -> Result<()> {
+    sqlx::query(
+        r#\"INSERT INTO frank_task_events (task_id, event_type, data, created_at)
+           VALUES ($1, $2, $3, NOW())\"#
+    )
+    .bind(task_id)
+    .bind(event_type)
+    .bind(data)
+    .execute(db)
+    .await?;
+    Ok(())
+}

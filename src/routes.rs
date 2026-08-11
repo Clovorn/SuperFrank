@@ -32,6 +32,8 @@ pub fn api_router() -> Router<AppState> {
         .route("/activity/live", get(activity_live))
         .route("/memory/search_semantic", post(memory_search_semantic))
         .route("/memory/search_hybrid", post(memory_search_hybrid))
+        .route("/api/v1/memory/build_history", get(memory::get_build_history))
+        .route("/api/v1/memory/file_history", get(memory::get_file_history))
         .route("/tools/exec", post(tools_exec))
         .route("/tools/pipeline", post(tools_pipeline))
         // Gap 9: Tool Registry
