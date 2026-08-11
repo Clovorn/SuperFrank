@@ -60,18 +60,9 @@ async fn create_voice_session(
         .header("OpenAI-Beta", "realtime=v1")
         .header("Authorization", format!("Bearer {}", openai_key))
         .header("Content-Type", "application/json")
-        .json(&json!({
-            "model": "gpt-4o-realtime-preview",
-            "voice": "verse",
-            "instructions": instructions,
-            "modalities": ["text", "audio"],
-            "turn_detection": {
-                "type": "server_vad",
-                "threshold": 0.5,
-                "prefix_padding_ms": 300,
-                "silence_duration_ms": 600
-            }
-        }))
+        // OpenAI client_secrets now requires an empty body.
+        // Model, voice, instructions, turn_detection all go via data channel session.update.
+        .json(&json!({}))
         .send().await
         .map_err(|e| (StatusCode::BAD_GATEWAY, Json(json!({"error": e.to_string()}))))?;
 
@@ -88,13 +79,15 @@ async fn create_voice_session(
     let session: Value = resp.json().await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
 
-    // Return client_secret.value (the ephemeral token) + session id to the browser
+    // Response: { value: "ek_xxx", expires_at: ..., session: {...} }
+    // The ephemeral token is at root "value", not nested under client_secret
     Ok(Json(json!({
-        "session_id": session["id"],
-        "client_secret": session["client_secret"]["value"],
-        "expires_at": session["client_secret"]["expires_at"],
+        "session_id": session["session"]["id"],
+        "client_secret": session["value"],
+        "expires_at": session["expires_at"],
         "model": "gpt-4o-realtime-preview",
-        "voice": "verse"
+        "voice": "verse",
+        "instructions": instructions
     })))
 }
 
